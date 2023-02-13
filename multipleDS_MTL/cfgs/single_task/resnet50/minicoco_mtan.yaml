@@ -1,0 +1,54 @@
+use_minids: True
+setup: 'single_task'
+approach: 'mtan'
+
+backbone: 'resnet50'
+detector: 'fasterrcnn'
+segmentor: null
+
+state_dict: 
+  # stem: '/root/volume/pre_weights/resnet50_IM1K_only_stem.pth'
+  # backbone: '/root/volume/pre_weights/resnet50_IM1K_only_layer.pth'
+  stem: null
+  backbone: null
+
+  static_pretrained: null
+  dynamic_pretrained: null
+
+task_cfg:
+  minicoco:
+    task: 'det'
+    num_classes: 91
+    reduce_classes: False
+    stem:
+      out_channels: 64
+    head: null
+    return_layers: ['0', '1', '2', '3']
+
+task_bs:
+ - 2
+
+single_args:
+  backbone_type: intermediate
+  dilation_type: fff
+  freeze_bn: True
+  use_fpn: True
+  train_allbackbone: False # train only three layers from last layer
+  freeze_backbone: False
+  relu_type: null
+  is_downsample_for_next_feat: [True, True, True, True]
+  is_global_attetion: [True, True, True, False]
+
+epochs: 12
+lr_steps: [8, 11]
+aspect-ratio-group-factor: 3
+print_freq: 50
+
+mtan_kwargs: 
+  attention_channels:
+    - 256
+    - 512
+    - 1024
+    - 2048
+  fpn_task:
+    - minicoco

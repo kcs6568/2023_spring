@@ -1,0 +1,223 @@
+# setup: 'multi_task'
+# method: 'baseline'
+
+# backbone: 'resnet50'
+# detector: 'fasterrcnn'
+# segmentor: 'fcn'
+
+# use_minids: True
+
+# state_dict: 
+#   stem: '/root/volume/pre_weights/resnet50_IM1K_only_stem.pth'
+#   backbone: '/root/volume/pre_weights/resnet50_IM1K_only_layer.pth'
+#   # stem: null
+#   # backbone: null
+
+# task_cfg:
+#   cifar10:
+#     task: 'clf'
+#     num_classes: 10
+#     stem:
+#       kernel_size: 3
+#       stride: 1
+#       padding: 1
+#     head:
+#       in_channel: 2048
+
+#   stl10:
+#     task: 'clf'
+#     num_classes: 10
+#     input_size: 96
+#     stem:
+#       kernel_size: 3
+#       stride: 2
+#       padding: 1
+#     head:
+#       in_channel: 2048
+
+#   minicoco:
+#     task: 'det'
+#     num_classes: 91
+#     reduce_classes: False
+#     stem:
+#       out_channels: 64
+  
+#   voc:
+#     task: 'seg'
+#     num_classes: 21
+#     task_cfg:
+#       train:
+#         year: '0712'
+#         task: 'trainval'
+#       test:
+#         year: '2007'
+#         task: 'test'
+#     stem:
+#       kernel_size: 7
+#       stride: 2
+#       padding: 3
+#     head:
+#       in_channels: 2048
+#       use_aux: True
+
+# task_bs: 
+#   - 2
+#   - 2
+#   - 2
+#   - 2
+
+# baseline_args:
+#   dilation_type: fft
+#   freeze_bn: True
+#   train_allbackbone: True
+#   # train_specific_layers: 1
+#   freeze_backbone: False
+#   relu_type: leaky
+#   return_dict:
+#     'clf':
+#       layer4: '3'
+#     'det': null
+#     'seg':
+#       layer3: '2'
+#       layer4: '3'
+
+
+# # use_awl: True
+# loss_ratio:
+#   cifar10: 0.1
+#   stl10: 0.1
+#   minicoco: 0.6
+#   voc: 0.2
+
+# epochs: 12
+# lr_steps: [8, 11]
+# aspect-ratio-group-factor: 3
+# print_freq: 50
+
+
+
+
+setup: 'multi_task'
+method: 'retrain'
+approach: 'baseline'
+
+backbone: 'resnet50'
+detector: 'fasterrcnn'
+segmentor: 'fcn'
+
+use_minids: True
+
+state_dict: 
+  # stem: '/root/volume/pre_weights/resnet50_IM1K_only_stem.pth'
+  # backbone: '/root/volume/pre_weights/resnet50_IM1K_only_layer.pth'
+  stem: null
+  backbone: null
+
+  # static_pretrained: "/root/volume/pre_weights/full_weight_12e.pth"
+  static_pretrained: null
+
+  dynamic_pretrained: null
+  # dynamic_pretrained: /root/volume/exp/resnet50_fasterrcnn_fcn/quadruple/cifar10_stl10_minicoco_voc/baseline/nGPU8_multi_adamw_lr1e-4_gamma0.1_fix4gate_blockweightsh_clip1_temp5_noclipgate/ckpts/checkpoint.pth
+  trained_weight: null
+
+task_cfg:
+  usps:
+    task: 'clf'
+    num_classes: 10
+    stem:
+      kernel_size: 3
+      stride: 1
+      padding: 1
+    head:
+      in_channel: 2048
+    return_layers: ['3']
+  cifar10:
+    task: 'clf'
+    num_classes: 10
+    stem:
+      kernel_size: 3
+      stride: 1
+      padding: 1
+    head:
+      in_channel: 2048
+    return_layers: ['3']
+
+  stl10:
+    task: 'clf'
+    num_classes: 10
+    input_size: 96
+    stem:
+      kernel_size: 3
+      stride: 1
+      padding: 1
+    head:
+      in_channel: 2048
+    return_layers: ['3']
+
+  minicoco:
+    task: 'det'
+    num_classes: 91
+    reduce_classes: False
+    stem:
+      out_channels: 64
+    return_layers: ['0', '1', '2', '3']
+  
+  voc:
+    task: 'seg'
+    num_classes: 21
+    task_cfg:
+      train:
+        year: '0712'
+        task: 'trainval'
+      test:
+        year: '2007'
+        task: 'test'
+    stem:
+      kernel_size: 7
+      stride: 2
+      padding: 3
+    head:
+      in_channels: 2048
+      use_aux: True
+    return_layers: ['2', '3']
+
+# same_lr: False
+# use_gate: False
+# one_groups: False
+# gating_lr: 0.01
+# gating_opt: null
+# gating_scheduler: null
+
+task_bs: 
+  - 2
+  - 4
+  - 2
+  - 2
+  - 2
+
+baseline_args:
+  is_hardsampling: False
+  backbone_type: intermediate
+  dilation_type: fft
+  freeze_bn: True
+  train_allbackbone: True
+  freeze_backbone: False
+  relu_type: null
+  freeze_stem: False
+  same_loss_weight: False
+
+get_task_param: True
+is_retrain: True
+
+use_avg_loss_ratio: False
+loss_ratio: null
+
+epochs: 12
+step_size: 1
+lr_steps: [1, 3]
+
+# weight_decay: 0.0001
+
+aspect-ratio-group-factor: 3
+print_freq: 50
+

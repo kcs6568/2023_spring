@@ -1,0 +1,32 @@
+cfg: /root/src/gated_mtl/cfgs/four_task/static/cifar10_stl10_minicoco_voc/resnet50_clf_det_seg.yaml
+
+# cfg: /root/src/mtl_cl/cfgs/single_task/resnet50/voc0712.yaml
+# ckpt: /root/volume/exp/resnet50_fasterrcnn_fcn/quadruple/cifar10_stl10_minicoco_voc/baseline/nGPU4_multi_adamw_lr1e-4_gamma0.25_clip1_ratio[1,1,6,2]_stlstemk3s1p1/ckpts/checkpoint.pth
+ckpt: /root/volume/exp/resnet50_fasterrcnn_fcn/quadruple/cifar10_stl10_minicoco_voc/static/nGPU4_multi_adamw_lr1e-4_gamma0.1_general/ckpts/checkpoint.pth
+# ckpt: /root/volume/pre_weights/fcn50_ckpt.pth
+
+# ckpt: /root/volume/exp/resnet50_fcn/single/voc/baseline/nGPU4_multi_sgd_lr0.02_gamma0.25_noclip_nowarmup/ckpts/checkpoint.pth
+# cfg: /root/src/mtl_cl/cfgs/single_task/resnet50/voc0712.yaml
+
+model: resnet50
+task_type:
+  cifar10: clf
+  stl10: clf
+  minicoco: det
+  voc: seg
+
+# det_sample: /root/det_sample.jpg
+# det_sample: /root/data/mmdataset/coco/val2017/000000521819.jpg
+det_sample: /root/data/mmdataset/VOCdevkit/VOC2012/JPEGImages/2009_005302.jpg
+
+
+# seg_sample: /root/data/mmdataset/VOCdevkit/VOC2012/JPEGImages/2010_003302.jpg
+seg_sample: /root/data/mmdataset/VOCdevkit/VOC2012/JPEGImages/2007_000063.jpg
+# seg_sample: /root/data/mmdataset/VOCdevkit/VOC2012/JPEGImages/2009_003624.jpg
+# seg_sample: /root/data/mmdataset/VOCdevkit/VOC2012/JPEGImages/2007_000783.jpg
+
+outdir: /root/volume/inference_results
+
+
+
+

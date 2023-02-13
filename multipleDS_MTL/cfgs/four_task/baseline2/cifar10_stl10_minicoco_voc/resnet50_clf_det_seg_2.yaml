@@ -1,0 +1,203 @@
+# setup: 'multi_task'
+# method: 'baseline'
+
+# backbone: 'resnet50'
+# detector: 'fasterrcnn'
+# segmentor: 'fcn'
+
+# use_minids: True
+
+# state_dict: 
+#   stem: '/root/volume/pre_weights/resnet50_IM1K_only_stem.pth'
+#   backbone: '/root/volume/pre_weights/resnet50_IM1K_only_layer.pth'
+#   # stem: null
+#   # backbone: null
+
+# task_cfg:
+#   cifar10:
+#     task: 'clf'
+#     num_classes: 10
+#     stem:
+#       kernel_size: 3
+#       stride: 1
+#       padding: 1
+#     head:
+#       in_channel: 2048
+
+#   stl10:
+#     task: 'clf'
+#     num_classes: 10
+#     input_size: 96
+#     stem:
+#       kernel_size: 3
+#       stride: 2
+#       padding: 1
+#     head:
+#       in_channel: 2048
+
+#   minicoco:
+#     task: 'det'
+#     num_classes: 91
+#     reduce_classes: False
+#     stem:
+#       out_channels: 64
+  
+#   voc:
+#     task: 'seg'
+#     num_classes: 21
+#     task_cfg:
+#       train:
+#         year: '0712'
+#         task: 'trainval'
+#       test:
+#         year: '2007'
+#         task: 'test'
+#     stem:
+#       kernel_size: 7
+#       stride: 2
+#       padding: 3
+#     head:
+#       in_channels: 2048
+#       use_aux: True
+
+# task_bs: 
+#   - 2
+#   - 2
+#   - 2
+#   - 2
+
+# baseline_args:
+#   dilation_type: fft
+#   freeze_bn: True
+#   train_allbackbone: True
+#   # train_specific_layers: 1
+#   freeze_backbone: False
+#   relu_type: leaky
+#   return_dict:
+#     'clf':
+#       layer4: '3'
+#     'det': null
+#     'seg':
+#       layer3: '2'
+#       layer4: '3'
+
+
+# # use_awl: True
+# loss_ratio:
+#   cifar10: 0.1
+#   stl10: 0.1
+#   minicoco: 0.6
+#   voc: 0.2
+
+# epochs: 12
+# lr_steps: [8, 11]
+# aspect-ratio-group-factor: 3
+# print_freq: 50
+
+
+
+
+setup: 'multi_task'
+method: 'baseline'
+
+backbone: 'resnet50'
+detector: 'fasterrcnn'
+segmentor: 'fcn'
+
+use_minids: True
+
+state_dict: 
+  stem: '/root/volume/pre_weights/resnet50_IM1K_only_stem.pth'
+  backbone: '/root/volume/pre_weights/resnet50_IM1K_only_layer.pth'
+
+task_cfg:
+  cifar10:
+    task: 'clf'
+    num_classes: 10
+    stem:
+      kernel_size: 3
+      stride: 1
+      padding: 1
+    head:
+      in_channel: 2048
+    return_layers: ['3']
+
+  stl10:
+    task: 'clf'
+    num_classes: 10
+    input_size: 96
+    stem:
+      kernel_size: 3
+      stride: 1
+      padding: 1
+    head:
+      in_channel: 2048
+    return_layers: ['3']
+
+  minicoco:
+    task: 'det'
+    num_classes: 91
+    reduce_classes: False
+    stem:
+      out_channels: 64
+    return_layers: ['0', '1', '2', '3']
+  
+  voc:
+    task: 'seg'
+    num_classes: 21
+    task_cfg:
+      train:
+        year: '0712'
+        task: 'trainval'
+      test:
+        year: '2007'
+        task: 'test'
+    stem:
+      kernel_size: 7
+      stride: 2
+      padding: 3
+    head:
+      in_channels: 2048
+      use_aux: True
+    return_layers: ['2', '3']
+
+same_lr: True
+use_gate: False
+gating_lr: 0.00000001
+gating_opt: null
+gating_scheduler: null
+
+
+task_bs: 
+  - 4
+  - 4
+  - 2
+  - 2
+
+baseline_args:
+  temperature: 10
+  # min_temp: 1
+  gamma: 0.1 # decaying factor
+  is_hardsampling: False
+  backbone_type: origin
+  dilation_type: fft
+  freeze_bn: True
+  train_allbackbone: True
+  freeze_backbone: False
+  relu_type: leaky
+  sharing_weight: 0.01
+  disjointed_weight: 0.001
+
+
+# use_awl: True
+loss_ratio:
+  cifar10: 0.1
+  stl10: 0.1
+  minicoco: 0.6
+  voc: 0.2
+
+epochs: 12
+lr_steps: [8, 11]
+aspect-ratio-group-factor: 3
+print_freq: 50
+

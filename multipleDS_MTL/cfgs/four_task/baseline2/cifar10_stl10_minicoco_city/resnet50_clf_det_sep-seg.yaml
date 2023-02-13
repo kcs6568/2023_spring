@@ -1,0 +1,48 @@
+use_minids: True
+use_origin: null
+
+backbone: 'resnet50'
+detector: 'fasterrcnn'
+segmentor: 'fcn'
+
+state_dict: 
+  stem: '/root/volume/pre_weights/resnet50_IM1K_only_stem.pth'
+  backbone: '/root/volume/pre_weights/resnet50_IM1K_only_layer.pth'
+  # stem: null
+  # backbone: null
+
+task_cfg:
+  clf: 
+    type: 'cifar10'
+    num_classes: 10
+    bs: 4
+
+  det:
+    type: 'coco'
+    num_classes: 91
+    bs: 3
+  
+  seg: null
+
+child_cfg:
+  seg:
+    type: 'voc'
+    num_classes: 21
+    bs: 3
+    head_cfg:
+      in_channels: 2048
+      channels: 21
+      use_aux: True
+    task_cfg:
+      train:
+        year: '0712'
+        task: 'trainval'
+      test:
+        year: '2007'
+        task: 'test'
+    
+
+epochs: 12
+aspect-ratio-group-factor: 3
+print_freq: 50
+

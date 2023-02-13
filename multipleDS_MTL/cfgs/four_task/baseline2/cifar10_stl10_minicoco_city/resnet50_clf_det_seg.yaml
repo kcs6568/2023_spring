@@ -1,0 +1,62 @@
+setup: 'multi_task'
+method: 'baseline'
+
+backbone: 'resnet50'
+detector: 'fasterrcnn'
+segmentor: 'fcn'
+
+use_minids: True
+
+state_dict: 
+  stem: '/root/volume/pre_weights/resnet50_IM1K_only_stem.pth'
+  backbone: '/root/volume/pre_weights/resnet50_IM1K_only_layer.pth'
+  # stem: null
+  # backbone: null
+
+task_cfg:
+  cifar10:
+    task: 'clf'
+    num_classes: 10
+    stem:
+      kernel_size: 3
+      stride: 1
+      padding: 1
+
+  stl10:
+    task: 'clf'
+    num_classes: 10
+    input_size: 96
+    # bs: 1
+    stem:
+      kernel_size: 1
+      stride: 3
+      padding: 0
+
+  minicoco:
+    task: 'det'
+    use_fpn: True
+    num_classes: 91
+  
+  cityscapes:
+    task: 'seg'
+    num_classes: 19
+    crop_size: 512
+    stem:
+      kernel_size: 7
+      stride: 2
+      padding: 3
+    head:
+      in_channels: 2048
+      num_classes: 19
+      use_aux: True
+
+loss_ratio:
+  cifar10: 0.1
+  stl10: 0.1
+  minicoco: 0.6
+  cityscapes: 0.2
+
+epochs: 12
+aspect-ratio-group-factor: 3
+print_freq: 50
+
