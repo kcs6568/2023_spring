@@ -91,6 +91,35 @@ class LinearLR(torch.optim.lr_scheduler._LRScheduler):
                 (self.end_factor - self.start_factor) * min(self.total_iters, self.last_epoch) / self.total_iters)
                 for base_lr in self.base_lrs]
         
+    
+class TempDecayABS:
+    def __init__(self, temperature, max_iter) -> None:
+        self.temperature = temperature
+        self.max_iter = max_iter
+        
+    
+    # @property
+    # def get_temperature(self):
+    #     return self.temperature
+    
+    def set_temperature(self):
+        raise NotImplementedError
+
+
+class SimpleDecay(TempDecayABS):
+    def __init__(self, temperature, max_iter, decay_gamma):
+        super(SimpleDecay, self).__init__(temperature, max_iter)
+        self.decay_gamma = decay_gamma
+        
+        
+    def set_temperature(self, cur_iter):
+        if cur_iter % self.max_iter == 0 :
+            self.temperature *= self.decay_gamma
+        return self.temperature
+
+
+
+    
         
 class PolynomialDecay:
     def __init__(self, temperature, max_iters, min_temp, power=0.9):
@@ -106,18 +135,18 @@ class PolynomialDecay:
 
 
 
-class SimpleDecay:
-    def __init__(self, temperature, max_iter, decay_gamma):
-        super(SimpleDecay, self).__init__()
-        self.temperature = temperature
-        self.decay_gamma = decay_gamma
-        self.max_iter = max_iter
+# class SimpleDecay:
+#     def __init__(self, temperature, max_iter, decay_gamma):
+#         super(SimpleDecay, self).__init__()
+#         self.temperature = temperature
+#         self.decay_gamma = decay_gamma
+#         self.max_iter = max_iter
         
     
-    def decay_temp(self, cur_iter):
-        if cur_iter % self.max_iter == 0 :
-            self.temperature *= self.decay_gamma
-        return self.temperature
+#     def decay_temp(self, cur_iter):
+#         if cur_iter % self.max_iter == 0 :
+#             self.temperature *= self.decay_gamma
+#         return self.temperature
 
 
 class ExponentialDecay:

@@ -14,6 +14,7 @@ class TextLogger:
         handlers = []
     
         logger = logging.getLogger()
+        logger.propagate = False
 
         # 로그의 출력 기준 설정
         logger.setLevel(logging.INFO)
@@ -25,13 +26,14 @@ class TextLogger:
             formatter = logging.Formatter('%(levelname)s - %(message)s')
 
         # log 출력
-        stream_handler = logging.StreamHandler()
-        handlers.append(stream_handler)
         if dist.is_available() and dist.is_initialized():
             rank = dist.get_rank()
         else:
             rank = 0
-
+        
+        stream_handler = logging.StreamHandler()
+        handlers.append(stream_handler)
+        
         if rank == 0:
             file_handler = logging.FileHandler(self.log_file)
             handlers.append(file_handler)
@@ -70,6 +72,9 @@ class TensorBoardLogger(SummaryWriter):
         for k, loss in data.items():
             self.add_scalar(f"{proc}/{k}", loss, time)
         
+    
+    
+    
     
     def close_tb(self):
         self.close()

@@ -75,7 +75,7 @@ class SmoothedValue:
 
     def __init__(self, window_size=20, fmt=None):
         if fmt is None:
-            fmt = "{median:.4f} ({global_avg:.4f})"
+            fmt = "{value:.4f} ({global_avg:.4f})"
         self.deque = deque(maxlen=window_size)
         self.total = 0.0
         self.count = 0
@@ -215,7 +215,6 @@ class MetricLogger:
     def add_meter(self, name, meter):
         self.meters[name] = meter
 
-    
     def set_before_train(self, header):
         space_fmt = ":" + str(len(str(self.largest_iters))) + "d"
         if torch.cuda.is_available():
@@ -424,7 +423,7 @@ def preprocess_data(batch_set, tasks, device="cuda"):
                 
             else:
                 data_dict[dset] = general_preprocess(data)
-                
+        
     
     return data_dict
 
@@ -638,10 +637,10 @@ def set_random_seed(seed, deterministic=False, device='cuda'):
     import random
     import numpy as np
     def _set_seed(seed):
-        random.seed(seed)
-        np.random.seed(seed)
         if seed is None:
             seed = torch.initial_seed()
+        random.seed(seed)
+        np.random.seed(seed)
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)

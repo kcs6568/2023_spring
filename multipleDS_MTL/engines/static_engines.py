@@ -34,14 +34,13 @@ class LossCalculator:
     def balancing_loss(self, output_losses):
         assert isinstance(output_losses, dict)
         losses = 0.
-        # balanced_losses = dict()
+        balanced_losses = dict()
         for data in self.data_cats:
             data_loss = sum(loss for k, loss in output_losses.items() if data in k)
             data_loss *= self.loss_ratio[data]
-            # balanced_losses.update({f"bal_{self.data_cats[data]}_{data}": data_loss})
+            balanced_losses.update({f"bal({str(self.loss_ratio[data])})_{self.data_cats[data]}_{data}": data_loss})
             losses += data_loss
-        
-        return losses
+        return losses, balanced_losses
     
     
     def general_loss(self, output_losses):
@@ -98,6 +97,9 @@ def training(model, optimizer, data_loaders,
     loss_for_save = None
     
     all_iter_losses = []
+    clip_value = torch.tensor(args.grad_clip_value, dtype=torch.float)
+    min_grad = torch.neg(clip_value) if clip_value > 0 else clip_value
+    max_grad = clip_value if clip_value > 0 else torch.neg(clip_value)
     
     for i, b_data in enumerate(biggest_dl):
         # print("iteration ",i)
@@ -137,22 +139,15 @@ def training(model, optimizer, data_loaders,
         if args.return_count:
             input_dicts.update({'load_count': load_cnt})
         
-        # logger.log_text(f"prepare dataset")
         input_set = metric_utils.preprocess_data(input_dicts, args.task_per_dset)
-        # logger.log_text(f"finish preparing")
         
         with torch.cuda.amp.autocast(enabled=scaler is not None):
-            # logger.log_text("enter dataset")
             loss_dict = model(input_set, other_args)
-            # logger.log_text("get loss")
-            # print("loss")
-        
+        # print(loss_dict)
         # torch.cuda.synchronize()
-        # logger.log_text("start loss reducing")
         
         losses = loss_calculator.loss_calculator(loss_dict)
-        dist.all_reduce(losses)
-        loss_dict_reduced = metric_utils.reduce_dict(loss_dict, average=True)
+        loss_dict_reduced = metric_utils.reduce_dict(loss_dict)
         losses_reduced = sum(loss for loss in loss_dict_reduced.values())
         loss_value = losses_reduced.item()
         if not math.isfinite(loss_value):
@@ -163,7 +158,6 @@ def training(model, optimizer, data_loaders,
         list_losses.append(losses_reduced)
         all_iter_losses.append(list_losses)
         
-        
         if scaler is not None:
             assert losses.dtype is torch.float32
             optimizer.zero_grad(set_to_none=args.grad_to_none)
@@ -171,28 +165,69 @@ def training(model, optimizer, data_loaders,
             
             if args.grad_clip_value is not None:
                 scaler.unscale_(optimizer) # this must require to get clipped gradients.
-                clipped_norm = torch.nn.utils.clip_grad_norm_( # clip gradient values to maximum 1.0
-                    [p for p in model.parameters() if p.requires_grad],
-                    args.grad_clip_value)
+                for p in model.parameters():
+                    if p.requires_grad and p.grad is not None: torch.clamp_(p.grad, min=min_grad, max=max_grad)
                 
             scaler.step(optimizer)
             scaler.update()
             
         
         else:
-            # print("optim")
             optimizer.zero_grad(set_to_none=args.grad_to_none)
-            # print("zero")
-            # if the retain_graph is True, the gpu memory will be increased, consequently occured OOM
             losses.backward()
-            # print("backward")
+            
+            # for d in datasets:
+            #     sums = sum(loss for k, loss in loss_dict.items() if d in k)
+                
+            #     optimizer.zero_grad(set_to_none=args.grad_to_none)
+            #     sums.backward(retain_graph=True)
+                
+            # exit()
+            
+            # torch.nn.utils.clip_grad_norm_( # clip gradient values to maximum 1.0
+            #             [p for p in model.parameters() if p.requires_grad], args.grad_clip_value)
+            
+            # b = 0.
+            # d = 0.
+            # for m, p in model.module.blocks.named_parameters():
+            #     if torch.any(torch.isinf(p.grad)): print("block inf", m)
+            #     if torch.any(torch.isnan(p.grad)): print("block Nan", m)
+            #     b += p.grad.norm()
+            
+            # for m, p in model.module.ds.named_parameters():
+            #     if torch.any(torch.isinf(p.grad)): print("block inf", m)
+            #     if torch.any(torch.isnan(p.grad)): print("block Nan", m)
+            #     d += p.grad.norm()
+            
+            # print(b+d)
+                    
+            # stems = []
+            # for d in datasets:
+            #     s = 0.
+            #     for p in model.module.stem_dict[d].parameters():
+            #         s += p.grad.norm()
+            #     stems.append(s)
+                
+            # heads = []
+            # for d in datasets:
+            #     s = 0.
+            #     for p in model.module.head_dict[d].parameters():
+            #         s += p.grad.norm()
+            #     heads.append(s)
+            
+            
+            # print(stems)
+            # print(heads)
+            
+            # exit()
+            
+            
             if args.grad_clip_value is not None:
-                torch.nn.utils.clip_grad_norm_(
-                    [p for p in model.parameters() if p.requires_grad],
-                    args.grad_clip_value)
-            # print("clip")
+                torch.nn.utils.clip_grad_norm_( # clip gradient values to maximum 1.0
+                        [p for p in model.parameters() if p.requires_grad], args.grad_clip_value)
+                # for p in model.parameters():
+                #     if p.requires_grad and p.grad is not None: torch.clamp_(p.grad, min=min_grad, max=max_grad)
             optimizer.step()           
-            # print("step\n")
             
         # for n, p in model.named_parameters():
         #     if p.grad is None:
@@ -202,6 +237,7 @@ def training(model, optimizer, data_loaders,
         if warmup_sch is not None:
             warmup_sch.step()
         
+        dist.all_reduce(losses)
         metric_logger.update(main_lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(loss=losses, **loss_dict_reduced)
         iter_time.update(time.time() - end) 
@@ -228,7 +264,7 @@ def training(model, optimizer, data_loaders,
         # if BREAK and i == args.print_freq:
         if BREAK and i == 2:
             print("BREAK!!")
-            torch.cuda.synchronize()
+            # torch.cuda.synchronize()
             break
             
         end = time.time()
@@ -237,7 +273,7 @@ def training(model, optimizer, data_loaders,
         #     torch.cuda.synchronize(torch.cuda.current_device)
         
         # logger.log_text(f"{i} iter finished\n")
-        torch.cuda.synchronize()
+        # torch.cuda.synchronize()
         
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -259,7 +295,6 @@ def _get_iou_types(task):
         iou_types.append("segm")
 
     return iou_types
-
 
 @torch.inference_mode()
 def evaluate(model, data_loaders, data_cats, logger, num_classes):
@@ -319,9 +354,9 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         # accumulate predictions from all images
         coco_evaluator.accumulate()
         logger.log_text("Finish accumulation")
-        coco_evaluator.summarize(logger)
+        coco_evaluator.summarize()
         logger.log_text("Finish summarization")
-        coco_evaluator.log_eval_summation(logger)
+        coco_evaluator.log_eval_summation()
         torch.set_num_threads(n_threads)
         
         return coco_evaluator.coco_eval['bbox'].stats[0] * 100.
@@ -383,9 +418,9 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
     dense_shape = {}
     is_dense = False
     
-    from ptflops import get_model_complexity_info
+    # from ptflops import get_model_complexity_info
+    from lib.utils.flop_counters.ptflops import get_model_complexity_info
     for dataset, taskloader in data_loaders.items():
-        print(dataset)
         if 'coco' in dataset or 'voc' in dataset:
             dense_shape.update({dataset: []})
             is_dense = True
@@ -399,6 +434,7 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
             coco = get_coco_api_from_dataset(taskloader.dataset)
             iou_types = _get_iou_types(task)
             coco_evaluator = CocoEvaluator(coco, iou_types)
+            coco_evaluator.set_logger_to_pycocotools(logger)
         
         val_function = _select_val_fn(task, dataset)
         metric_function = _select_metric_fn(task, dataset)
@@ -433,10 +469,11 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
             batch_set = metric_utils.preprocess_data(batch_set, data_cats)
 
             iter_start_time = time.time()
-            macs, eval_time, outputs = get_model_complexity_info(
+            macs, _, outputs = get_model_complexity_info(
                 model, batch_set, dataset, task, as_strings=False,
                 print_per_layer_stat=False, verbose=False
             )
+            
             torch.cuda.synchronize()
             iter_time.update(time.time() - iter_start_time) 
             mac_count += macs
@@ -501,7 +538,6 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
     return final_results
     
 
-@torch.inference_mode()
 def classification_for_cm(model, data_loaders, data_cats, output_dir):
     model.eval()
     

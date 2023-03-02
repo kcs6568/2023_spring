@@ -23,6 +23,12 @@ class CocoEvaluator:
 
         self.img_ids = []
         self.eval_imgs = {k: [] for k in iou_types}
+        
+    
+    def set_logger_to_pycocotools(self, logger):
+        for eval_module in self.coco_eval.values():
+            setattr(eval_module, "logger", logger)
+
 
     def update(self, predictions):
         img_ids = list(np.unique(list(predictions.keys())))
@@ -49,34 +55,35 @@ class CocoEvaluator:
         for coco_eval in self.coco_eval.values():
             coco_eval.accumulate()
 
-    def summarize(self, logger):
+    def summarize(self):
         for iou_type, coco_eval in self.coco_eval.items():
             print(f"IoU metric: {iou_type}")
-            coco_eval.summarize(logger)
+            coco_eval.summarize()
             
-    def log_eval_summation(self, logger):
-        results = self.coco_eval[self.iou_types[0]].stats
-        area_type = ['small', 'medium', 'large']
-        iou_rng = ['0.50', '0.75', '0.50:0.95']
-        
-        line = "<Evaluation Results>\n" \
-            "IoU metric: {}\n".format(self.iou_types[0])
-        
-        for i in range(len(results)):
-            titleStr = 'Average Precision' if i < 6 else 'Average Recall'
-            typeStr = '(AP)' if i < 6 else '(AR)'
-            areaRng = 'all' if i % 6 < 3 else area_type[i % 3]
+    def log_eval_summation(self):
+        for iou_type, coco_eval in self.coco_eval.items():
+            results = coco_eval.stats
+            area_type = ['small', 'medium', 'large']
+            iou_rng = ['0.50', '0.75', '0.50:0.95']
             
-            if i == 1 or i == 2:
-                iou_type = iou_rng[i-1]
-            else:
-                iou_type = iou_rng[2]
+            line = "<Evaluation Results>\n" \
+                "IoU metric: {}\n".format(self.iou_types[0])
             
-            line += "  {:<18} {} @[ IoU={:<9} | area={:>6s} ] = {:0.3f}\n".format(
-                titleStr, typeStr, iou_type, areaRng, results[i]
-            )
-            
-        logger.log_text(line)
+            for i in range(len(results)):
+                titleStr = 'Average Precision' if i < 6 else 'Average Recall'
+                typeStr = '(AP)' if i < 6 else '(AR)'
+                areaRng = 'all' if i % 6 < 3 else area_type[i % 3]
+                
+                if i == 1 or i == 2:
+                    iou_type = iou_rng[i-1]
+                else:
+                    iou_type = iou_rng[2]
+                
+                line += "  {:<18} {} @[ IoU={:<9} | area={:>6s} ] = {:0.3f}\n".format(
+                    titleStr, typeStr, iou_type, areaRng, results[i]
+                )
+                
+            coco_eval.logger.log_text(line)
         
             
     def prepare(self, predictions, iou_type):
@@ -87,6 +94,7 @@ class CocoEvaluator:
         if iou_type == "keypoints":
             return self.prepare_for_coco_keypoint(predictions)
         raise ValueError(f"Unknown iou type {iou_type}")
+
 
     def prepare_for_coco_detection(self, predictions):
         coco_results = []

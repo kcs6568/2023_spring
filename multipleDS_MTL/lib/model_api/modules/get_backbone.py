@@ -10,7 +10,6 @@ from collections import OrderedDict
 from typing import Dict, Optional
 
 from ..backbones.resnet import get_resnet
-from ..backbones.mobilenet_v3 import get_mobilenet_v3
 
 
 class IntermediateLayerGetter(nn.ModuleDict):
@@ -177,99 +176,10 @@ def resnet_without_fpn(
                            backbone_type=backbone_args['backbone_type'])
 
 
-def mobilenetv3_fpn_backbone(
-    backbone_name,
-    backbone_args,
-    detector,
-    segmentor
-):
-    backbone = get_mobilenet_v3(backbone_name, weight_path=backbone_args.pop('weight_path'), **backbone_args)   # The first and last blocks are always included because they are the C0 (conv1) and Cn.
-    feature_layers = backbone.features
-    
-    return_indices = [i for i, b in enumerate(feature_layers) if getattr(b, "_is_cn", False)] + [len(feature_layers) - 1]
-    num_stages = len(return_indices)
-    
-    if not detector and not segmentor:
-        return_indices = [len(feature_layers) - 1]
-        num_stages = len(return_indices)
-        returned_layers = [num_stages - 1]
-    
-    elif detector and not segmentor:
-        returned_layers = [num_stages - 2, num_stages - 1] # if returned_layer is 'all' or list type
-    
-    elif not detector and segmentor:
-        returned_layers = [num_stages - 4, num_stages - 1]
-    
-    else: # all model
-        returned_layers = [num_stages - 3, num_stages - 2, num_stages - 1]
-        # returned_layers = [num_stages - 2, num_stages - 1]
-
-    
-    # print(rm,beturned_layers)
-    assert min(returned_layers) >= 0 and max(returned_layers) < num_stages
-
-    trainable_type = backbone_args['trainable_layers']
-    # Freeze layers before the layers of [freeze_before] value
-    if isinstance(trainable_type, str) and trainable_type == 'all':
-        freeze_before = 0
-        trainable_layers = len(feature_layers)
-        
-    else:
-        trainable_layers = trainable_type
-        assert isinstance(trainable_layers, int)
-        freeze_before = len(feature_layers) if trainable_layers == 0 else return_indices[num_stages - trainable_layers]
-        assert 0 <= trainable_layers <= num_stages
-    
-    for b in feature_layers[:freeze_before]:
-        for parameter in b.parameters():
-            parameter.requires_grad_(False)
-            
-    return_layers = {f'{return_indices[k]}': str(v) for v, k in enumerate(returned_layers)}
-    
-    extra_blocks = backbone_args['extra_blocks']
-    in_channels_list = None
-    out_channels = 256
-    if backbone_args['use_fpn']:
-        if extra_blocks is None:
-            extra_blocks = LastLevelMaxPool()
-        else:
-            extra_blocks = backbone_args['extra_blocks']
-        in_channels_list = [feature_layers[return_indices[i]].out_channels for i in returned_layers]
-    
-    
-    print(detector, segmentor)
-    print(num_stages)
-    print(trainable_layers)
-    print(return_indices)
-    print(returned_layers)
-    print(freeze_before)
-    # exit()
-            
-    return BackboneWithFPN(
-        feature_layers, return_layers, in_channels_list, out_channels, 
-        extra_blocks=extra_blocks, 
-        backbone_type=backbone_args['backbone_type'], 
-        use_fpn=backbone_args['use_fpn'])
-    
-
-
-        
-    # else:
-    #     m = nn.Sequential(
-    #         backbone,
-    #         # depthwise linear combination of channels to reduce their size
-    #         nn.Conv2d(backbone[-1].out_channels, out_channels, 1),
-    #     )
-    #     m.out_channels = out_channels
-    #     return m
-
-
-
-
 def build_backbone(arch, detector=None,
                    segmentor=None,
                    model_args=None):
-    backbone_args = {}
+    # model_args = {}
     
     freeze_backbone = model_args.pop('freeze_backbone')
     train_allbackbone = model_args.pop('train_allbackbone')
@@ -283,40 +193,37 @@ def build_backbone(arch, detector=None,
     #         freeze_backbone = False
     # else:
     #     raise RuntimeError("the value of freeze_backbone must be the opposite value of train_allbackbone and vise versa")           
-        
-    
 
     if 'without_fpn' in model_args:
         without_fpn = model_args['without_fpn']
     else:
         without_fpn = False
     
-    backbone_args = {
+    model_args.update({
         'norm_layer': misc_nn_ops.FrozenBatchNorm2d if freeze_bn else None,
         'deform_layers': model_args['deform'] if 'deform' in model_args else False,
-        'weight_path': model_args['state_dict']['backbone'],
+        # 'weight_path': model_args['state_dict']['backbone'],
         'backbone_type': 'intermediate' if not 'backbone_type' in model_args is None else model_args['backbone_type'],
-        'extra_blocks': None,
-    }
+        'extra_blocks': None})
     
     if detector is not None: 
         if 'faster' in detector:
-            backbone_args.update({'use_fpn': model_args['use_fpn']})
+            model_args.update({'use_fpn': model_args['use_fpn']})
         
         elif 'retina' in detector:
-            backbone_args.update({'extra_blocks': LastLevelP6P7(256, 256)})
-            backbone_args.update({'returned_layers': [2, 3, 4]})
+            model_args.update({'extra_blocks': LastLevelP6P7(256, 256)})
+            model_args.update({'returned_layers': [2, 3, 4]})
         
         else:
             ValueError("The detector name {} is not supported detector.".format(detector))
     
     elif not detector and segmentor:
         assert not model_args['use_fpn']
-        backbone_args.update({'use_fpn': model_args['use_fpn']})
+        model_args.update({'use_fpn': model_args['use_fpn']})
     
     elif not detector and not segmentor:
         assert not model_args['use_fpn']
-        backbone_args.update({'use_fpn': model_args['use_fpn']})
+        model_args.update({'use_fpn': model_args['use_fpn']})
     
     if 'resnet' in arch or 'resnext' in arch:
         def check_return_layers(detector, segmentor):
@@ -364,56 +271,24 @@ def build_backbone(arch, detector=None,
             else:
                 trainable_backbone_layers = 4
                 
-        backbone_args.update({'replace_stride_with_dilation': replace_stride_with_dilation})
-        backbone_args.update({'relu_type': model_args['relu_type'] if 'relu_type' in model_args else None})
-        backbone_args.update({'trainable_layers': trainable_backbone_layers})
+        model_args.update({'replace_stride_with_dilation': replace_stride_with_dilation})
+        model_args.update({'activation_fucntion': model_args['activation_function'] if 'activation_function' in model_args else None})
+        model_args.update({'trainable_layers': trainable_backbone_layers})
         
         
         if without_fpn:
             backbone = resnet_without_fpn(
                 arch,
-                backbone_args
+                model_args
             )
         else:
-            backbone_args.update({'returned_layers': check_return_layers(detector, segmentor)})
+            model_args.update({'returned_layers': check_return_layers(detector, segmentor)})
             backbone = resnet_fpn_backbone(
                 arch,
-                backbone_args
+                model_args
             )
             
 
-    elif 'mobile' in arch:
-        if train_allbackbone:
-            trainable_layers = 'all'
-        else:
-            trainable_layers = 3
-            
-        backbone_args.update({'dilated': model_args['dilated']})
-        backbone_args.update({'use_fpn': model_args['use_fpn']})
-        backbone_args.update({'trainable_layers': trainable_layers})
-        backbone_args.update({'no_st_early': model_args['no_st_early']})
-        
-        backbone = mobilenetv3_fpn_backbone(
-            arch,
-            backbone_args,
-            detector,
-            segmentor
-        )
-        
-    
-    else:
-        raise ValueError("The backbone name should be required.")
-    
-    if 'use_kd' in model_args:
-        if model_args['use_kd']:
-            feature_extractor = resnet_without_fpn(
-                arch,
-                backbone_args)
-            return backbone, feature_extractor
-        else:
-            return backbone
-
-    else:
         return backbone
 
 

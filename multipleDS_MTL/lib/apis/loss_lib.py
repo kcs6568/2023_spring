@@ -231,11 +231,8 @@ def non_shared_gate_loss(gate_logits, tasks):
     return non_sharing_loss
 
 
-def disjointed_policy_loss(gate_logits, tasks, num_blocks, smoothing_alpha=None):
+def disjointed_policy_loss(gate_logits, num_blocks, smoothing_alpha=None):
     loss = 0.
-    # alpha = torch.tensor([(num_blocks - (i))/num_blocks for i in range(num_blocks)]).float().cuda()
-    # alpha = torch.tensor([0.4 for _ in range(num_blocks)]).float().cuda()
-    # alpha[:fixed_gate] = 0
     if smoothing_alpha is not None:
         gt_ = torch.ones(num_blocks, 2).long().cuda()
         gt = torch.tensor([[l*(1-smoothing_alpha) + smoothing_alpha/len(oh) for l in oh] for i, oh in enumerate(gt_)]).float().cuda()
@@ -243,9 +240,19 @@ def disjointed_policy_loss(gate_logits, tasks, num_blocks, smoothing_alpha=None)
     else:
         gt = torch.ones(num_blocks).long().cuda()    
         
-    for dset in tasks:
-        # gt = torch.ones(len(gate_logits[dset])).long().cuda()    
-        loss += F.cross_entropy(gate_logits[dset], gt)
+    # for dset in tasks:
+    #     loss += F.cross_entropy(gate_logits[dset], gt)
+    
+    # if return_sum:    
+    #     for logit in gate_logits.values():
+    #         loss += F.cross_entropy(logit, gt)
+            
+    # else:
+    #     loss = {}
+    #     for data, logit in gate_logits.items(): loss[data] = F.cross_entropy(logit, gt)
+    
+    for logit in gate_logits.values():
+        loss += F.cross_entropy(logit, gt)
         
     return loss
 

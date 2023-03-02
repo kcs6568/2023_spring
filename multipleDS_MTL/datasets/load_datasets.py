@@ -18,6 +18,8 @@ def load_datasets(args, only_val=True):
     val_loaders = OrderedDict()
     test_loaders = OrderedDict()
     
+    dataset_root = "/root/data/"
+    
     for data, cfg in args.task_cfg.items():
         args.batch_size = args.task_bs[data]
         if 'clf' in cfg['task']:
@@ -32,39 +34,39 @@ def load_datasets(args, only_val=True):
             
             if data == 'stl10':
                 test_ld = None
-                train_ld, val_ld = load_stl10(args, data, '/root/data/pytorch_datasets', input_size=cfg['input_size'])
+                train_ld, val_ld = load_stl10(args, data, '/root/data', input_size=cfg['input_size'])
             
             elif data == 'imagenet1k':
                 test_ld = None
-                train_ld, val_ld = load_imagenet1k(args, data, path='/root/data/img_type_datasets/ImageNet-1K', only_val=only_val)
+                train_ld, val_ld = load_imagenet1k(args, data, path='/root/data/ImageNet-1K', only_val=only_val)
                 
-            elif data == 'omniglot':
-                test_ld = None
-                train_ld, val_ld = load_omniglot(args, data, path='/root/data/pytorch_datasets/')
+            # elif data == 'omniglot':
+            #     test_ld = None
+            #     train_ld, val_ld = load_omniglot(args, data, path='/root/data/pytorch_datasets/')
                 
-            elif data == 'usps':
-                test_ld = None
-                train_ld, val_ld = load_usps(args, data, path='/root/data/pytorch_datasets/USPS')
+            # elif data == 'usps':
+            #     test_ld = None
+            #     train_ld, val_ld = load_usps(args, data, path='/root/data/pytorch_datasets/USPS')
             
-            elif data == 'mnist':
-                test_ld = None
-                train_ld, val_ld = load_mnist(args, data, path='/root/data/pytorch_datasets')
+            # elif data == 'mnist':
+            #     test_ld = None
+            #     train_ld, val_ld = load_mnist(args, data, path='/root/data/pytorch_datasets')
             
-            elif data == 'fashion':
-                test_ld = None
-                train_ld, val_ld = load_fashion(args, data, path='/root/data/pytorch_datasets')
+            # elif data == 'fashion':
+            #     test_ld = None
+            #     train_ld, val_ld = load_fashion(args, data, path='/root/data/pytorch_datasets')
             
 
         elif 'det' in cfg['task']:
             if 'coco' in data:
-                train_ld, val_ld, test_ld = load_coco(args, data, "/root/data/mmdataset/coco", trs_type='det')
+                train_ld, val_ld, test_ld = load_coco(args, data, "/root/data/coco", trs_type='det')
                 
             elif 'voc' in data:
                 train_ld, val_ld, test_ld = load_voc(args, data, cfg['task'], cfg['task_cfg'])
             
         elif 'seg' in cfg['task']:
             if 'coco' in data:
-                train_ld, val_ld, test_ld = load_coco(args, data, "/root/data/mmdataset/coco", trs_type='det')
+                train_ld, val_ld, test_ld = load_coco(args, data, "/root/data/coco", trs_type='det')
                 
             elif 'voc' in data:
                 train_ld, val_ld, test_ld = load_voc(args, data, cfg['task'], cfg['task_cfg'])

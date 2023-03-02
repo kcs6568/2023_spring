@@ -178,8 +178,27 @@ def get_scheduler_for_gating(args, optimizer):
 
 
 def get_optimizer(args, model):
-    params = [p for p in model.parameters() if p.requires_grad]
-    
+    if 'optimizer_args' in args:
+        opt_args = args.optimizer_args
+        if 'ignore_keys' in args.optimizer_args:
+            
+            main_params = []
+            ign_params = []
+            for n, p in model.named_parameters():
+                if p.requires_grad and not opt_args['ignore_keys'] in n:
+                    main_params.append(p)
+                
+                else:
+                    ign_params.append(p)
+                
+            params = [
+                {'params': main_params, 'lr': args.lr},
+                {'params': ign_params, 'lr': opt_args['ign_lr']}
+            ]
+            
+    else:
+        params = [p for p in model.parameters() if p.requires_grad]
+        
     if args.opt == 'sgd':
         optimizer = torch.optim.SGD(params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     elif args.opt == 'nesterov':

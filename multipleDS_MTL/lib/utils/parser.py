@@ -91,8 +91,7 @@ class TrainParser:
         parser.add_argument("--resume", action='store_true')
         parser.add_argument("--resume-tmp", action='store_true')
         parser.add_argument("--resume-file", default=None, type=str)
-        parser.add_argument("--return-count", action='store_true',
-                            help="return reloaded count for loss balancing on overloaded dataset")
+        parser.add_argument("--return-count", action='store_true', help="return reloaded count for loss balancing on overloaded dataset")
         parser.add_argument("--grad-clip-value", default=None, type=int)
         parser.add_argument("--grad-to-none", action='store_true')
         
@@ -154,6 +153,7 @@ class TrainParser:
         # environment settings
         parser.add_argument("--exp-case", default="0", type=str, help="exp case")
         parser.add_argument("--print-freq", default=50, type=int, help="print frequency")
+        parser.add_argument("--save-all-epoch", action='store_true')
         parser.add_argument("--output-dir", default="/root/volume/exp", type=str, help="path to save outputs")
         
         # distributed training settings
@@ -162,7 +162,7 @@ class TrainParser:
         parser.add_argument("--world-size", default=1, type=int, help="number of distributed processes")
         parser.add_argument("--dist-url", default="env://", type=str, help="url used to set up distributed training")
         parser.add_argument("--seed", default=0, type=int)
-        # parser.add_argument("--distributed", action='store_false')
+        parser.add_argument("--local_rank", type=int, default=0)
 
         parser.add_argument("--effect-type", default=None,)
         parser.add_argument("--effect-direction", default=None,)

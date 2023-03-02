@@ -83,22 +83,24 @@ class DetStem(nn.Module):
                  freeze_bn=False,
                  min_size=800, max_size=1333, 
                  image_mean=None, image_std=None,
-                 use_maxpool=True) -> None:
+                 use_maxpool=True,
+                 activation_function=nn.ReLU(inplace=True)) -> None:
         super().__init__()
         self.conv = nn.Conv2d(3, out_channels, kernel_size=kernel_size, stride=stride, padding=padding,
                                bias=False)
         # self.bn = nn.BatchNorm2d(out_channels)
         bn = misc_nn_ops.FrozenBatchNorm2d if freeze_bn else nn.BatchNorm2d
         self.bn = bn(out_channels)
-        self.activation = nn.ReLU(inplace=True)
+        self.activation = activation_function
             
         if use_maxpool:
             self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         else:
             self.maxpool = None
         
-        if stem_weight:
-            ckpt = torch.load(stem_weight)
+        if stem_weight is not None:
+            print("!!!Load weights for detection stem layer!!!")
+            ckpt = torch.load("/root/volume/pretrained_weights/resnet50_IM1K_dense_stem.pth")
             self.load_state_dict(ckpt)
         
         if image_mean is None:
@@ -162,10 +164,10 @@ class FasterRCNN(nn.Module):
                 anchor_sizes, aspect_ratios
             )
         
-        relu_type = kwargs['relu_type'] if 'relu_type' in kwargs else None
+        activation_function = kwargs['activation_function']
         if rpn_head is None:
             rpn_head = RPNHead(
-                out_channels, rpn_anchor_generator.num_anchors_per_location()[0], relu=relu_type
+                out_channels, rpn_anchor_generator.num_anchors_per_location()[0], activation_function=activation_function
             )
 
         rpn_pre_nms_top_n = dict(training=rpn_pre_nms_top_n_train, testing=rpn_pre_nms_top_n_test)
@@ -189,7 +191,7 @@ class FasterRCNN(nn.Module):
             representation_size = 1024
             box_head = TwoMLPHead( # same as fast-rcnn
                 out_channels * resolution ** 2,
-                representation_size, relu=relu_type)
+                representation_size, activation_function=activation_function)
             
         if box_predictor is None:
             representation_size = 1024
@@ -290,88 +292,6 @@ class FasterRCNN(nn.Module):
             return self.eager_outputs(losses, detections)
     
 
-class ConvHeadBlock_A(nn.Module):
-    def __init__(self, in_channels, out_channels) -> None:
-        super(ConvHeadBlock_A, self).__init__()
-        self.only_1x1 = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, bias=False),    
-            nn.BatchNorm2d(out_channels)
-        )
-        
-        self.two_conv = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(in_channels),
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, bias=False),
-            nn.BatchNorm2d(out_channels)
-        )
-        
-        
-    def forward(self, x):
-        x1 = self.only_1x1(x)
-        x2 = self.two_conv(x)
-        
-        out = F.relu(x1+x2)
-        
-        return out
-    
-    
-class ConvHeadBlock_B(nn.Module):
-    def __init__(self, in_channels, bottleneck_channels) -> None:
-        super(ConvHeadBlock_B, self).__init__()
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(in_channels, bottleneck_channels, kernel_size=1, stride=1, bias=False),
-            nn.BatchNorm2d(bottleneck_channels),
-        )
-        
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(bottleneck_channels),
-        )
-        
-        self.conv3 = nn.Sequential(
-            nn.Conv2d(bottleneck_channels, in_channels, kernel_size=1, stride=1, bias=False),
-            nn.BatchNorm2d(in_channels),
-        )
-        
-        
-    def forward(self, x):
-        out = self.conv1(x)
-        out = self.conv2(out)
-        out = self.conv3(out)
-        
-        out = F.relu(out + x)
-        
-        return out
-    
-    
-class ConvHeadBlock_C(nn.Module):
-    def __init__(self, in_channels, bottleneck_channels) -> None:
-        super(ConvHeadBlock_C, self).__init__()
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(in_channels, bottleneck_channels, kernel_size=1, stride=1, bias=False),
-            nn.BatchNorm2d(bottleneck_channels),
-        )
-        
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(bottleneck_channels, bottleneck_channels, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(bottleneck_channels),
-        )
-        
-        self.conv3 = nn.Sequential(
-            nn.Conv2d(bottleneck_channels, in_channels, kernel_size=1, stride=1, bias=False),
-            nn.BatchNorm2d(in_channels),
-        )
-        
-    
-    def forward(self, x):
-        out = self.conv1(x)
-        out = self.conv2(out)
-        out = self.conv3(out)
-        
-        out = F.relu(out + x)
-        
-        return out   
-
 
 
 
@@ -447,25 +367,18 @@ class TwoMLPHead(nn.Module):
         representation_size (int): size of the intermediate representation
     """
 
-    def __init__(self, in_channels, representation_size, relu=None):
+    def __init__(self, in_channels, representation_size, activation_function):
         super(TwoMLPHead, self).__init__()
 
         self.fc6 = nn.Linear(in_channels, representation_size)
         self.fc7 = nn.Linear(representation_size, representation_size)
-        self.relu = nn.ReLU(inplace=True)
-        # self.relu = F.relu
+        self.activation = activation_function
 
     def forward(self, x):
-        # print("TwoMLP")
         x = x.flatten(start_dim=1)
-        # print(x.size())
 
-        # x = self.relu(self.fc6(x))
-        # x = self.relu(self.fc7(x))
-        x = self.relu(self.fc6(x))
-        # print(x.size())
-        x = self.relu(self.fc7(x))
-        # print(x.size())
+        x = self.activation(self.fc6(x))
+        x = self.activation(self.fc7(x))
 
         return x
     
@@ -489,14 +402,9 @@ class FastRCNNPredictor(nn.Module):
     def forward(self, x):
         if x.dim() == 4:
             assert list(x.shape[2:]) == [1, 1]
-        # print("FasterRCNNPredictor")
-        # print(x.size())
         x = x.flatten(start_dim=1)
-        # print(x.size())
         scores = self.cls_score(x)
-        # print(scores.size())
         bbox_deltas = self.bbox_pred(x)
-        # print(bbox_deltas.size())
 
         return scores, bbox_deltas
     
@@ -510,7 +418,7 @@ class RPNHead(nn.Module):
         num_anchors (int): number of anchors to be predicted
     """
 
-    def __init__(self, in_channels, num_anchors, relu=None):
+    def __init__(self, in_channels, num_anchors, activation_function):
         super(RPNHead, self).__init__()
         self.conv = nn.Conv2d(
             in_channels, in_channels, kernel_size=3, stride=1, padding=1
@@ -523,7 +431,7 @@ class RPNHead(nn.Module):
             torch.nn.init.normal_(layer.weight, std=0.01)
             torch.nn.init.constant_(layer.bias, 0)
             
-        self.relu = nn.ReLU(inplace=True)
+        self.activation = activation_function
             
         # self.relu = nn.ReLU(inplace=True) if relu is None else relu
         # self.relu = F.relu
@@ -533,7 +441,7 @@ class RPNHead(nn.Module):
         bbox_reg = []
         for feature in x:
             # t = self.relu(self.conv(feature))
-            t = self.relu(self.conv(feature))
+            t = self.activation(self.conv(feature))
             logits.append(self.cls_logits(t))
             bbox_reg.append(self.bbox_pred(t))
         return logits, bbox_reg

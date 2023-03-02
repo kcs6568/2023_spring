@@ -10,10 +10,10 @@ class ClfHead(nn.Module):
                  in_channel,
                  num_classes,
                  middle_channle=None,
-                 use_avgpool=True) -> None:
+                 use_avgpool=True,
+                 **kwargs) -> None:
         super().__init__()
         self.avg = nn.AdaptiveAvgPool2d((1,1)) if use_avgpool else None
-        
         if 'resnet' in backbone_type or 'resnext' in backbone_type:
             self.classifier = nn.Linear(in_channel, num_classes)
             
@@ -63,15 +63,13 @@ class ClfStem(nn.Module):
                  stride=1,
                  padding=1,
                  maxpool=None,
-                 relu=None) -> None:
+                 stem_weight=None,
+                 activation_function=nn.ReLU(inplace=True)) -> None:
         super().__init__()
         self.conv = nn.Conv2d(sample_dimension, out_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=False)
         self.bn = nn.BatchNorm2d(out_channels)
         
-        if relu == 'hardswish':
-            self.activation = nn.Hardswish(inplace=True)
-        else:
-            self.activation = nn.ReLU(inplace=True)
+        self.activation = activation_function
         
         # self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         self.maxpool = maxpool

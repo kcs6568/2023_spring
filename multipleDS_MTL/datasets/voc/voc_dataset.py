@@ -12,7 +12,7 @@ except ImportError:
 
 
 class VOCDataset(Dataset):
-    _DATA_ROOT = '/root/data/mmdataset/VOCdevkit'
+    _DATA_ROOT = '/root/data/VOCdevkit'
     _VALID_YEARS = ['2007', '2012', '0712']
     _VALID_TASK = ['train', 'val', 'trainval', 'test']
         
@@ -30,7 +30,12 @@ class VOCDataset(Dataset):
         
         assert year in self._VALID_YEARS
         assert self.task in self._VALID_TASK
-        voc_root = [os.path.join(self.root, 'VOC'+year)]
+        
+        if task == 'test':
+            voc_root = [os.path.join(self.root, 'VOC2007/VOCtest_06-Nov-2007/VOCdevkit/VOC'+year)]    
+        else:
+            voc_root = [os.path.join(self.root, 'VOC'+year)]
+            
         if year == '0712':
             voc_root = [
                 os.path.join(self.root, 'VOC2007'),
@@ -39,12 +44,6 @@ class VOCDataset(Dataset):
         self.images = []
         self.targets = []
         
-        images07 = []
-        images12 = []
-        
-        
-        image_size = 0
-        target_size = 0
         for v_root in voc_root:
             image_dir = os.path.join(v_root, "ImageSets", self._IMAGE_TXT_DIR)
             image_file = os.path.join(image_dir, self.task.rstrip("\n") + ".txt")

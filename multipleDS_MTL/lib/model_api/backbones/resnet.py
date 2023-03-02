@@ -161,7 +161,7 @@ class Bottleneck(nn.Module):
         base_width: int = 64,
         dilation: int = 1,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
-        relu=None
+        activation_function = nn.ReLU(inplace=True)
     ) -> None:
         super(Bottleneck, self).__init__()
         if norm_layer is None:
@@ -174,16 +174,7 @@ class Bottleneck(nn.Module):
         self.bn2 = norm_layer(width)
         self.conv3 = conv1x1(width, planes * self.expansion)
         self.bn3 = norm_layer(planes * self.expansion)
-        
-        # self.relu = nn.ReLU(inplace=True)
-        if relu is None:
-            self.relu = nn.ReLU(inplace=True)
-        elif relu == 'leaky':
-            self.relu = nn.LeakyReLU(inplace=True)
-        elif relu == 'prelu':
-            self.relu = nn.PReLU()
-        else:
-            raise ValueError(f"not supported activation function: {relu}")
+        self.activation = activation_function
             
         self.downsample = downsample
         self.stride = stride
@@ -192,11 +183,11 @@ class Bottleneck(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         out = self.conv1(x)
         out = self.bn1(out)
-        out = self.relu(out)
+        out = self.activation(out)
 
         out = self.conv2(out)
         out = self.bn2(out)
-        out = self.relu(out)
+        out = self.activation(out)
 
         out = self.conv3(out)
         out = self.bn3(out)
@@ -223,7 +214,7 @@ class IdentityBottleneck(nn.Module):
         base_width: int = 64,
         dilation: int = 1,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
-        relu=None
+        activation_function = nn.ReLU(inplace=True)
     ) -> None:
         super(IdentityBottleneck, self).__init__()
         if norm_layer is None:
@@ -236,41 +227,42 @@ class IdentityBottleneck(nn.Module):
         self.bn2 = norm_layer(width)
         self.conv3 = conv1x1(width, planes * self.expansion)
         self.bn3 = norm_layer(planes * self.expansion)
-        
-        # self.relu = nn.ReLU(inplace=True)
-        if relu is None:
-            self.relu = nn.ReLU(inplace=True)
-        elif relu == 'leaky':
-            self.relu = nn.LeakyReLU(inplace=True)
-        elif relu == 'prelu':
-            self.relu = nn.PReLU()
-        else:
-            raise ValueError(f"not supported activation function: {relu}")
-            
+        self.activation = activation_function    
         self.downsample = downsample
         self.stride = stride
         self.out_channels = planes * self.expansion
 
     def forward(self, x: Tensor) -> Tensor:
+        # cuda_device = torch.cuda.current_device()
+        # print(f"cuda: {cuda_device}, bottleneck 1")
         identity = x
+        # print(f"cuda: {cuda_device}, bottleneck 2")
 
         out = self.conv1(x)
+        # print(f"cuda: {cuda_device}, bottleneck 3")
         out = self.bn1(out)
-        out = self.relu(out)
+        # print(f"cuda: {cuda_device}, bottleneck 4")
+        out = self.activation(out)
+        # print(f"cuda: {cuda_device}, bottleneck 5")
 
         out = self.conv2(out)
+        # print(f"cuda: {cuda_device}, bottleneck 6")
         out = self.bn2(out)
-        out = self.relu(out)
+        # print(f"cuda: {cuda_device}, bottleneck 7")
+        out = self.activation(out)
+        # print(f"cuda: {cuda_device}, bottleneck 8")
 
         out = self.conv3(out)
+        # print(f"cuda: {cuda_device}, bottleneck 9")
         out = self.bn3(out)
+        # print(f"cuda: {cuda_device}, bottleneck 10")
 
         if self.downsample is not None:
             identity = self.downsample(x)
+            # print(f"cuda: {cuda_device}, bottleneck 10-1")
 
         out += identity
-        out = self.relu(out)
-
+        # print(f"cuda: {cuda_device}, bottleneck 11")
         return out
 
 
@@ -303,20 +295,21 @@ class ResNet(nn.Module):
         self.groups = groups
         self.base_width = width_per_group
         
-        # self.relu = nn.ReLU(inplace=True) if kwargs['relu_type'] is None else kwargs['relu_type']
-        # self.relu = nn.LeakyReLU(inplace=True)
-        # self.relu = nn.ReLU(inplace=True)
-        
-        self.relu_type = kwargs['relu_type'] if 'relu_type' in kwargs else None
+        activation_function = kwargs['activation_function']
+        assert activation_function is not None
 
         self.in_channels = [64, 128, 256, 512]
-        self.layer1 = self._make_layer(block, self.in_channels[0], layers[0])
+        self.layer1 = self._make_layer(block, self.in_channels[0], layers[0],
+                                       activation_function=activation_function)
         self.layer2 = self._make_layer(block, self.in_channels[1], layers[1], stride=2,
-                                       dilate=replace_stride_with_dilation[0])
+                                       dilate=replace_stride_with_dilation[0],
+                                       activation_function=activation_function)
         self.layer3 = self._make_layer(block, self.in_channels[2], layers[2], stride=2,
-                                       dilate=replace_stride_with_dilation[1])
+                                       dilate=replace_stride_with_dilation[1],
+                                       activation_function=activation_function)
         self.layer4 = self._make_layer(block, self.in_channels[3], layers[3], stride=2,
-                                       dilate=replace_stride_with_dilation[2])
+                                       dilate=replace_stride_with_dilation[2],
+                                       activation_function=activation_function)
         
         # self.last_out_channel = 512 * block.expansion
 
@@ -336,7 +329,8 @@ class ResNet(nn.Module):
 
     
     def _make_layer(self, block: Type[Union[BasicBlock, Bottleneck]], planes: int, blocks: int,
-                    stride: int = 1, dilate: bool = False) -> nn.Sequential:
+                    stride: int = 1, dilate: bool = False,
+                    activation_function=nn.ReLU(inplace=True)) -> nn.Sequential:
         norm_layer = self._norm_layer
         downsample = None
         previous_dilation = self.dilation
@@ -351,12 +345,14 @@ class ResNet(nn.Module):
 
         layers = []
         layers.append(block(self.inplanes, planes, stride, downsample, self.groups,
-                            self.base_width, previous_dilation, norm_layer, self.relu_type))
+                            self.base_width, previous_dilation, norm_layer, 
+                            activation_function=activation_function))
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
             layers.append(block(self.inplanes, planes, groups=self.groups,
                                 base_width=self.base_width, dilation=self.dilation,
-                                norm_layer=norm_layer, relu=self.relu_type))
+                                norm_layer=norm_layer, 
+                                activation_function=activation_function))
 
         return nn.Sequential(*layers)
 
@@ -402,13 +398,17 @@ def _resnet(
 ) -> ResNet:
     model = ResNet(block, layers, **kwargs)
     
-    if pretrained:
-        if weight_path is not None:
-            print("!!!Load pretrained body weights!!!")
-            state_dict = torch.load(weight_path)
-            model.load_state_dict(state_dict, strict=True)
-        else:
-            print("!!!Not load pretrained body weights!!!")
+    
+    
+    # if pretrained:
+    #     if weight_path is not None:
+    #         state_dict = torch.load('/root/volume/pretrained_weights/resnet50_IM1K_body.pth')
+    #         model.load_state_dict(state_dict, strict=True)
+    #         print("!!!Loaded pretrained body weights!!!")
+    #     else:
+    #         print("!!!Not load pretrained body weights!!!")
+    
+    
     
     return model
 
@@ -431,10 +431,6 @@ def get_resnet(model, weight_path=None, pretrained=True, **kwargs):
     
     elif model == 'wide_resnet50_2':
         return wide_resnet50_2(pretrained=pretrained, weight_path=weight_path, **kwargs)
-        
-
-    
-    
     
 
 def resnet18(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
@@ -469,7 +465,14 @@ def resnet50(pretrained: bool = False, weight_path=None, progress: bool = True, 
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         progress (bool): If True, displays a progress bar of the download to stderr
     """
-    return _resnet(Bottleneck, [3, 4, 6, 3], pretrained, weight_path, progress,
+    bottleneck_type = kwargs['bottleneck_type']
+    
+    if bottleneck_type == 'default':
+        block = Bottleneck
+    elif bottleneck_type == 'identity':
+        block = IdentityBottleneck
+        
+    return _resnet(block, [3, 4, 6, 3], pretrained, weight_path, progress,
                    **kwargs)
 
 

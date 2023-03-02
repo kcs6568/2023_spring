@@ -79,8 +79,8 @@ class GeneralizedRCNNTransform(nn.Module):
             min_size = (min_size,)
         self.min_size = min_size
         self.max_size = max_size
-        self.image_mean = image_mean
-        self.image_std = image_std
+        self.image_mean = torch.as_tensor(image_mean)[:, None, None].cuda()
+        self.image_std = torch.as_tensor(image_std)[:, None, None].cuda()
         self.size_divisible = size_divisible
         self.fixed_size = fixed_size
 
@@ -131,15 +131,19 @@ class GeneralizedRCNNTransform(nn.Module):
                 f"but found type {image.dtype} instead"
             )
         
-        mean = torch.tensor(self.image_mean).cuda()
-        std = torch.tensor(self.image_std).cuda()
-        
+        # mean = torch.tensor(self.image_mean).cuda()
+        # std = torch.tensor(self.image_std).cuda()
+        # print(image.size())
+        # print(mean)
+        # print(std)
+        # print(self.image_mean.size())
+        # print(self.image_std.size())
         # dtype, device = image.dtype, image.device
-        
         # mean = torch.as_tensor(self.image_mean, dtype=dtype, device=device)
         # std = torch.as_tensor(self.image_std, dtype=dtype, device=device)
+        # return (image - mean[:, None, None]) / std[:, None, None]
         
-        return (image - mean[:, None, None]) / std[:, None, None]
+        return (image - self.image_mean) / self.image_std
 
     def torch_choice(self, k: List[int]) -> int:
         """

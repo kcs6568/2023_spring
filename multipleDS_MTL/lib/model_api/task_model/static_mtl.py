@@ -1,6 +1,5 @@
 from dataclasses import replace
 import numpy as np
-from scipy.special import softmax
 from collections import OrderedDict
 
 import torch
@@ -13,9 +12,12 @@ from ..modules.get_segmentor import build_segmentor, SegStem
 from ..modules.get_classifier import build_classifier, ClfStem
 
 
-def init_weights(m):
+def init_weights(m, type="kaiming"):
     if isinstance(m, nn.Conv2d):
-        nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+        if type == 'kaiming':
+            nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+        elif type == 'xavier':
+            nn.init.xavier_normal_(m.weight)
         
         if m.bias is not None:
             nn.init.constant_(m.bias, 0)
@@ -25,7 +27,10 @@ def init_weights(m):
         nn.init.constant_(m.bias, 0)
         
     elif isinstance(m, nn.Linear):
-        nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
+        if type == 'kaiming':
+            nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+        elif type == 'xavier':
+            nn.init.xavier_normal_(m.weight)
         nn.init.constant_(m.bias, 0)
 
 
@@ -41,25 +46,31 @@ class StaticMTL(nn.Module):
         backbone_network = build_backbone(
             backbone, detector, segmentor, kwargs)
         
-        self.blocks = []
-        self.ds = []
+        if kwargs['backbone_weight'] is not None:
+            backbone_weight = torch.load(kwargs['backbone_weight'])
+            backbone_network.body.load_state_dict(backbone_weight, strict=True)
+            print("!!!Loaded pretrained body weights!!!")
+        
         self.num_per_block = []
+        blocks = []
+        ds = []
 
         for _, p in backbone_network.body.named_children():
             block = []
             self.num_per_block.append(len(p))
             for m, q in p.named_children():
                 if m == '0':
-                    self.ds.append(q.downsample)
+                    ds.append(q.downsample)
                     q.downsample = None
                 
                 block.append(q)
                 
-            self.blocks.append(nn.ModuleList(block))
-                
-        self.blocks = nn.ModuleList(self.blocks)
-        self.ds = nn.ModuleList(self.ds)
-        self.fpn = backbone_network.fpn
+            blocks.append(nn.ModuleList(block))
+        
+        self.encoder = nn.ModuleDict({
+            'block': nn.ModuleList(blocks),
+            'ds': nn.ModuleList(ds)
+        })
         
         self.stem_dict = nn.ModuleDict()
         self.head_dict = nn.ModuleDict()
@@ -67,38 +78,58 @@ class StaticMTL(nn.Module):
         self.return_layers = {}
         data_list = []
         
-        stem_weight = kwargs['state_dict']['stem']
+        shared_stem_configs = {
+            'activation_function': kwargs['activation_function']
+        }
+        
+        shared_head_configs = {
+            'activation_function': kwargs['activation_function']
+        }
+        
+        # stem_weight = kwargs['state_dict']['stem']
         for data, cfg in task_cfg.items():
             data_list.append(data)
             self.return_layers.update({data: cfg['return_layers']})
             
+            if 'stem' in cfg:
+                stem_cfg = cfg['stem']
+            else:
+                head_cfg = {}
+            
+            if 'head' in cfg:
+                head_cfg = cfg['head']
+            else:
+                head_cfg = {}
+            
+            stem_cfg.update(shared_stem_configs)
+            head_cfg.update(shared_head_configs)
+            
             task = cfg['task']
             num_classes = cfg['num_classes']
             if task == 'clf':
-                stem = ClfStem(**cfg['stem'])
+                stem = ClfStem(**stem_cfg)
                 head = build_classifier(
-                    backbone, num_classes, cfg['head'])
+                    backbone, num_classes, head_cfg)
                 stem.apply(init_weights)
                 
             elif task == 'det':
-                stem = DetStem(**cfg['stem'])
+                stem = DetStem(**stem_cfg)
                 
-                head_kwargs = {'num_anchors': len(backbone_network.body.return_layers)+1}
-                head = build_detector(
+                head_cfg.update({'num_anchors': len(backbone_network.body.return_layers)+1})
+                detection = build_detector(
                     backbone, detector, 
-                    backbone_network.fpn_out_channels, num_classes, **head_kwargs)
-                if stem_weight is not None:
-                    ckpt = torch.load(stem_weight)
-                    stem.load_state_dict(ckpt, strict=False)
-                    print("!!!Load weights for detection stem layer!!!")
+                    backbone_network.fpn_out_channels, num_classes, **head_cfg)
+                
+                if backbone_network.fpn is not None:
+                    head = nn.ModuleDict({
+                        'fpn': backbone_network.fpn,
+                        'detector': detection
+                    })
+                
             
             elif task == 'seg':
-                stem = SegStem(**cfg['stem'])
-                head = build_segmentor(segmentor, num_classes=num_classes, cfg_dict=cfg['head'])
-                if stem_weight is not None:
-                    ckpt = torch.load(stem_weight)
-                    stem.load_state_dict(ckpt, strict=False)
-                    print("!!!Load weights for segmentation stem layer!!!")
+                stem = SegStem(**stem_cfg)
+                head = build_segmentor(segmentor, num_classes=num_classes, cfg_dict=head_cfg)
             
             head.apply(init_weights)
             self.stem_dict.update({data: stem})
@@ -119,13 +150,16 @@ class StaticMTL(nn.Module):
         
         data = self._extract_stem_feats(data_dict)
         
+        block_module = self.encoder['block']
+        ds_module = self.encoder['ds']
+        
         for dset, feat in data.items():
             block_count=0
             # print(f"{dset} geration")
             for layer_idx, num_blocks in enumerate(self.num_per_block):
                 for block_idx in range(num_blocks):
-                    identity = self.ds[layer_idx](feat) if block_idx == 0 else feat
-                    feat = F.leaky_relu(self.blocks[layer_idx][block_idx](feat) + identity)
+                    identity = ds_module[layer_idx](feat) if block_idx == 0 else feat
+                    feat = F.leaky_relu(block_module[layer_idx][block_idx](feat) + identity)
                     
                     block_count += 1
                     
@@ -149,8 +183,8 @@ class StaticMTL(nn.Module):
                     losses = head(back_feats, targets)
                     
                 elif task == 'det':
-                    fpn_feat = self.fpn(back_feats)
-                    losses = head(data_dict[dset][0], fpn_feat,
+                    fpn_feat = head['fpn'](back_feats)
+                    losses = head['detector'](data_dict[dset][0], fpn_feat,
                                             self.stem_dict[dset].transform, 
                                         origin_targets=targets)
                     
@@ -171,8 +205,8 @@ class StaticMTL(nn.Module):
             back_feats = backbone_feats[dset]
             
             if task == 'det':
-                fpn_feat = self.fpn(back_feats)
-                predictions = head(data_dict[dset][0], fpn_feat, self.stem_dict[dset].transform)
+                fpn_feat = head['fpn'](back_feats)
+                predictions = head['detector'](data_dict[dset][0], fpn_feat, self.stem_dict[dset].transform)
                 
             else:
                 if task == 'seg':
