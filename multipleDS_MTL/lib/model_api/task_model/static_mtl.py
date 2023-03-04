@@ -145,6 +145,14 @@ class StaticMTL(nn.Module):
     
     
     def get_features(self, data_dict, other_hyp):
+        # for dd, smp in data_dict.items():
+        #     print(smp)
+        
+        # for ddd, smp in data_dict.items():
+        #     print(ddd, len(smp[0]))
+            
+        # exit()
+        
         total_losses = OrderedDict()
         backbone_feats = OrderedDict({dset: {} for dset in data_dict.keys()})
         
@@ -220,6 +228,20 @@ class StaticMTL(nn.Module):
             
             return predictions
 
+    
+    # def replace_batch_setting_for_DP(self, data_dict):
+    
 
     def forward(self, data_dict, kwargs):
+        for ddd, smp in data_dict.items():
+            print(ddd)
+            print(smp[0])
+            if isinstance(smp[0], list):
+                print(len(smp[0]))
+                print(smp[0][0].size())
+            else:
+                print(smp[0].size())
+            print()
+        exit()
+        
         return self.get_features(data_dict, kwargs)

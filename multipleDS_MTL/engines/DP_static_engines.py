@@ -15,19 +15,6 @@ from datasets.coco.coco_utils import get_coco_api_from_dataset
 BREAK=False
 
 
-def clipping_coeff(param_list):
-    max_norm = 1.0
-    norm_type = 2.0
-    
-    device = get_rank()
-    
-    total_norm = torch.norm(torch.stack([torch.norm(p.grad.detach(), norm_type).to(device) for p in param_list]), norm_type)
-    clip_coef = max_norm / (total_norm + 1e-6)
-    clip_coef_clamped = torch.clamp(clip_coef, max=1.0)
-    
-    return clip_coef_clamped
-
-
 class LossCalculator:
     def __init__(self, type, data_cats, loss_ratio, task_weights=None, method='multi_task') -> None:
         self.type = type
@@ -51,30 +38,16 @@ class LossCalculator:
         for data in self.data_cats:
             data_loss = sum(loss for k, loss in output_losses.items() if data in k)
             data_loss *= self.loss_ratio[data]
-            # balanced_losses.update({f"bal({str(self.loss_ratio[data])})_{self.data_cats[data]}_{data}": data_loss})
-            balanced_losses.update({data: data_loss})
+            balanced_losses.update({f"bal({str(self.loss_ratio[data])})_{self.data_cats[data]}_{data}": data_loss})
             losses += data_loss
         return losses, balanced_losses
     
     
-    def general_loss(self, output_losses, wm=None):
+    def general_loss(self, output_losses):
         assert isinstance(output_losses, dict)
+        losses = sum(loss for loss in output_losses.values())
         
-        if wm is None:
-            losses = sum(loss for loss in output_losses.values())
-            return losses, None
-        
-        else:
-            task_losses = {data: sum(l for n, l in output_losses.items() if data in n) for data in self.data_cats}
-            wm_losses = wm(task_losses)
-            
-            losses = 0.
-            log_losses = {}
-            for data, loss in wm_losses.items():
-                log_losses[f"{wm.method_name}_{data}"] = loss
-                losses += loss
-            
-            return losses, log_losses
+        return losses
 
 
 def training(model, optimizer, data_loaders, 
@@ -110,7 +83,6 @@ def training(model, optimizer, data_loaders,
     else:
         logger.log_text("No Warmup Training")
     
-    # loss_calculator = None
     if args.lossbal:
         loss_calculator = LossCalculator(
             'balancing', args.task_per_dset, args.loss_ratio, method=args.method)
@@ -129,15 +101,17 @@ def training(model, optimizer, data_loaders,
     min_grad = torch.neg(clip_value) if clip_value > 0 else clip_value
     max_grad = clip_value if clip_value > 0 else torch.neg(clip_value)
     
-    # wm = None
-    wm = model.module.wm
     for i, b_data in enumerate(biggest_dl):
+        # print("iteration ",i)
         input_dicts.clear()
         input_dicts[biggest_datasets] = b_data
+        # logger.log_text(f"start iteration {i}")
         
         try:
             for n_dset in range(1, len(others_iterator)):
                 input_dicts[others_dsets[n_dset]] = next(others_iterator[n_dset])
+                # logger.log_text(f"{n_dset} next")
+            # torch.cuda.synchronize()
             
         except StopIteration:
             logger.log_text("occur StopIteration")
@@ -159,58 +133,74 @@ def training(model, optimizer, data_loaders,
                 if not others_dsets[n_task] in input_dicts.keys():
                     input_dicts[others_dsets[n_task]] = next(others_iterator[n_task])
 
+        # finally:
+        #     torch.cuda.synchronize()
             
         if args.return_count:
             input_dicts.update({'load_count': load_cnt})
         
         input_set = metric_utils.preprocess_data(input_dicts, args.task_per_dset)
         
+        for ddd, smp in input_set.items():
+            print(ddd)
+            # print(smp[0])
+            if isinstance(smp[0], list):
+                print(len(smp[0]))
+                print(smp[0][0].size())
+            else:
+                print(smp[0].size())
+            print()
+        # exit()
+        
+        input_set['minicoco'][0] = torch.cat(input_set['minicoco'][0], dim=0)
+        
+        for ddd, smp in input_set.items():
+            print(ddd)
+            print(type(smp[0]))
+            print(smp[0].size())
+            print()
+        exit()
+        
+        
+        
         with torch.cuda.amp.autocast(enabled=scaler is not None):
-            other_args.update({'cur_iter': i})
             loss_dict = model(input_set, other_args)
+        # print(loss_dict)
+        # torch.cuda.synchronize()
         
-        losses, log_losses = loss_calculator.loss_calculator(loss_dict, wm)
-        if log_losses is not None: loss_dict.update(log_losses)
-        
-        loss_dict_reduced = metric_utils.reduce_dict(loss_dict)
-        losses_reduced = sum(loss for loss in loss_dict_reduced.values())
-        loss_value = losses_reduced.item()
-        if not math.isfinite(loss_value):
-            logger.log_text(f"Loss is {loss_value}, stopping training\n\t{loss_dict_reduced}", level='error')
+        losses = loss_calculator.loss_calculator(loss_dict)
+        if not math.isfinite(losses):
+            logger.log_text(f"Loss is {losses}, stopping training\n\t{loss_dict}", level='error')
             sys.exit(1)
         
-        # print("aa")
-        list_losses = list(loss_dict_reduced.values())
-        list_losses.append(losses_reduced)
+        list_losses = list(loss_dict.values())
+        list_losses.append(losses)
         all_iter_losses.append(list_losses)
         
-        optimizer.zero_grad(set_to_none=args.grad_to_none)
         if scaler is not None:
-            # optimizer.zero_grad(set_to_none=args.grad_to_none)
+            assert losses.dtype is torch.float32
+            optimizer.zero_grad(set_to_none=args.grad_to_none)
             scaler.scale(losses).backward()
             
             if args.grad_clip_value is not None:
                 scaler.unscale_(optimizer) # this must require to get clipped gradients.
-                torch.nn.utils.clip_grad_norm_( # clip gradient values to maximum 1.0
-                    [p for p in model.parameters() if p.requires_grad],
-                    args.grad_clip_value)
+                for p in model.parameters():
+                    if p.requires_grad and p.grad is not None: torch.clamp_(p.grad, min=min_grad, max=max_grad)
                 
             scaler.step(optimizer)
             scaler.update()
             
         
         else:
+            optimizer.zero_grad(set_to_none=args.grad_to_none)
             losses.backward()
             
             
             if args.grad_clip_value is not None:
-                # for p in model.parameters(): torch.clamp_(p.grad, min_grad, max_grad)
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    args.grad_clip_value)
-            optimizer.step()
+                torch.nn.utils.clip_grad_norm_( # clip gradient values to maximum 1.0
+                        [p for p in model.parameters() if p.requires_grad], args.grad_clip_value)
+            optimizer.step()           
             
-               
         # for n, p in model.named_parameters():
         #     if p.grad is None:
         #         print(f"{n} has no grad")
@@ -219,33 +209,23 @@ def training(model, optimizer, data_loaders,
         if warmup_sch is not None:
             warmup_sch.step()
         
-        dist.all_reduce(losses)
         metric_logger.update(main_lr=optimizer.param_groups[0]["lr"])
-        metric_logger.update(loss=losses, **loss_dict_reduced)
+        metric_logger.update(loss=losses, **loss_dict)
         iter_time.update(time.time() - end) 
         
         if BREAK:
             args.print_freq = 10
         
-        if (i % args.print_freq == 0 or i == (biggest_size - 1)) and get_rank() == 0:
+        if (i % args.print_freq == 0 or i == (biggest_size - 1)):
             metric_logger.log_iter(
                 iter_time.global_avg,
                 args.epochs-epoch,
                 logger,
                 i
             )
-            if not model.module.retrain_phase:
-                logger.log_text(f"Intermediate Gate Logits (up: use / down: no use)")
-                for dset in datasets: logger.log_text(f"{dset}:\n{torch.transpose(model.module.task_gating_params[dset].data.clone().detach(), 0, 1)}")
-                logger.log_text(f"Temperature: {model.module.decay_function.temperature}\n")
-                
-                if wm is not None:
-                    logger.log_text(f"{wm.method_name}_Params: {str(wm)}")
             
         if tb_logger:
-            tb_logger.update_scalars(loss_dict_reduced, i)   
-            if not model.module.retrain_phase:
-                if wm is not None: tb_logger.update_scalars(wm.logsigma, i)
+            tb_logger.update_scalars(loss_dict, i)   
 
             '''
             If the break block is in this block, the gpu memory will stuck (bottleneck)
@@ -273,7 +253,7 @@ def training(model, optimizer, data_loaders,
     torch.cuda.empty_cache()
     time.sleep(3)
     
-    loss_keys = list(loss_dict_reduced.keys())
+    loss_keys = list(loss_dict.keys())
     loss_keys.append("sum_loss")
     all_iter_losses.append(loss_keys)
     
@@ -305,7 +285,7 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         
 
     def _metric_classification():
-        # print("######### entered clf metric")
+        print("######### entered clf metric")
         metric_logger.synchronize_between_processes()
         # print("######### synchronize finish")
         top1_avg = metric_logger.meters['top1'].global_avg
@@ -334,12 +314,12 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         logger.log_text("Validation result accumulate and summarization")
         if torch.cuda.is_available():
             torch.cuda.synchronize(torch.cuda.current_device)
-        logger.log_text("Metric logger synch start")
-        metric_logger.synchronize_between_processes()
-        logger.log_text("Metric logger synch finish\n")
-        logger.log_text("COCO evaluator synch start")
-        coco_evaluator.synchronize_between_processes()
-        logger.log_text("COCO evaluator synch finish\n")
+        # logger.log_text("Metric logger synch start")
+        # metric_logger.synchronize_between_processes()
+        # logger.log_text("Metric logger synch finish\n")
+        # logger.log_text("COCO evaluator synch start")
+        # coco_evaluator.synchronize_between_processes()
+        # logger.log_text("COCO evaluator synch finish\n")
 
         # accumulate predictions from all images
         coco_evaluator.accumulate()
@@ -359,7 +339,7 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         
     def _metric_segmentation():
         # print("######### entered seg metirc")
-        confmat.reduce_from_all_processes()
+        # confmat.reduce_from_all_processes()
         logger.log_text("<Current Step Eval Accuracy>\n{}".format(confmat))
         return confmat.mean_iou
     
@@ -408,6 +388,7 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
     dense_shape = {}
     is_dense = False
     
+    # from ptflops import get_model_complexity_info
     from lib.utils.flop_counters.ptflops import get_model_complexity_info
     for dataset, taskloader in data_loaders.items():
         if 'coco' in dataset or 'voc' in dataset:
@@ -439,9 +420,15 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         header = "Validation - " + dataset.upper() + ":"
         iter_time = metric_utils.SmoothedValue(fmt="{avg:.4f}")
         metric_logger.largest_iters = len(taskloader)
+        # metric_logger.epohcs = args.epochs
         metric_logger.set_before_train(header)
         
+        # task_kwargs = {'dtype': dataset, 'task': task}
+        # task_kwargs = {dataset: task} 
+        task_kwargs = {"task_list": {dataset: task}}
         mac_count = 0.
+        total_eval_time = 0
+        
         
         total_start_time = time.time()
         for i, data in enumerate(taskloader):
@@ -449,24 +436,20 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
             '''
             batch_set: images(torch.cuda.tensor), targets(torch.cuda.tensor)
             '''
-            task_data = metric_utils.preprocess_data(batch_set, data_cats)
-            # imgs, labels = task_data[dataset][0], task_data[dataset][1]
-            
+            batch_set = metric_utils.preprocess_data(batch_set, data_cats)
+
             iter_start_time = time.time()
             macs, _, outputs = get_model_complexity_info(
-                model, task_data, dataset, task, as_strings=False,
+                model, batch_set, dataset, task, as_strings=False,
                 print_per_layer_stat=False, verbose=False
             )
             
-            torch.cuda.synchronize()
+            # torch.cuda.synchronize()
             iter_time.update(time.time() - iter_start_time) 
             mac_count += macs
             
-            # val_function(outputs, labels, iter_start_time)
-            val_function(outputs, task_data[dataset][1], iter_start_time)
-            
-            
-            torch.cuda.synchronize()
+            val_function(outputs, batch_set[dataset][1], iter_start_time)
+            # torch.cuda.synchronize()
             if ((i % 50 == 0) or (i == len(taskloader) - 1)) and get_rank() == 0:
                 metric_logger.log_iter(
                     iter_time.global_avg,
@@ -474,12 +457,19 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
                     logger,
                     i
                 )
+            
+            # if tb_logger:
+            #     tb_logger.update_scalars(loss_dict_reduced, i)   
                 
+            end = time.time()
             if BREAK and i == 2:
                 print("BREAK!!!")
                 break
             
-            torch.cuda.synchronize()
+            # if i == 19:
+            #     break
+            
+            # torch.cuda.synchronize()
         total_end_time = time.time() - total_start_time
         
         all_time_str = str(datetime.timedelta(seconds=int(total_end_time)))
@@ -493,14 +483,14 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         task_avg_time.update({dataset: avg_time_str})
         
         mac_count = torch.tensor(mac_count).cuda()
-        dist.all_reduce(mac_count)
-        logger.log_text(f"All reduced MAC:{round(float(mac_count)*1e-9, 2)}")
-        averaged_mac = mac_count/((i+1) * get_world_size())
-        logger.log_text(f"Averaged MAC:{round(float(averaged_mac)*1e-9, 2)}\n")
+        # dist.all_reduce(mac_count)
+        logger.log_text(f"All MAC:{round(float(mac_count)*1e-9, 2)}")
+        # averaged_mac = mac_count/((i+1) * get_world_size())
+        # logger.log_text(f"Averaged MAC:{round(float(averaged_mac)*1e-9, 2)}\n")
         
-        task_flops.update({dataset: round(float(averaged_mac)*1e-9, 2)})
+        # task_flops.update({dataset: round(float(averaged_mac)*1e-9, 2)})
         
-        torch.distributed.barrier()
+        # torch.distributed.barrier()
         
         time.sleep(2)
         if torch.cuda.is_available():

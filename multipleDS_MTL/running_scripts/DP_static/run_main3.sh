@@ -36,4 +36,4 @@ BACKBONE=$5
 
 
 
-./run_three.sh 29500 baseline 3 4 resnet50
+./run_three3.sh 6060 baseline 7 2 resnet50

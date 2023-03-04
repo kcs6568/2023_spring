@@ -96,7 +96,6 @@ class TempDecayABS:
     def __init__(self, temperature, max_iter) -> None:
         self.temperature = temperature
         self.max_iter = max_iter
-        
     
     # @property
     # def get_temperature(self):
@@ -115,9 +114,6 @@ class SimpleDecay(TempDecayABS):
     def set_temperature(self, cur_iter):
         if cur_iter % self.max_iter == 0 :
             self.temperature *= self.decay_gamma
-        return self.temperature
-
-
 
     
         

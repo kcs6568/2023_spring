@@ -46,7 +46,7 @@ def main(args):
     # os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
     metric_utils.mkdir(args.output_dir) # master save dir
     metric_utils.mkdir(os.path.join(args.output_dir, 'ckpts')) # checkpoint save dir
-    
+    torch.set_printoptions(linewidth=150)
     # distributed.init_process_group(
     #     ackend=args.dist_backend, init_method=args.dist_url, 
     #     world_size=args.world_size, rank=args.rank, timeout=time.timedelta(seconds=120))
@@ -100,12 +100,39 @@ def main(args):
     
     logger.log_text("Creating model")
     logger.log_text(f"Freeze Shared Backbone Network: {args.freeze_backbone}")
-    model = build_model(args)
     
-    metric_utils.get_params(model, logger, False)
+    model = build_model(args)
+    if args.retrain_phase:
+        setattr(model, 'retrain_phase', True)
+        retrain_args = args.retrain_args
+        args.epochs = retrain_args['epoch']
+        args.opt = retrain_args['optimizer']
+        
+        args.lr_scheduler = retrain_args['scheduler']
+        if retrain_args['scheduler'] == 'multi':
+            args.lr_steps = retrain_args['scheduler_step']
+        elif retrain_args['scheduler'] == 'step':
+            args.step_size = retrain_args['step_size']
+        
+        gated_weight = torch.load(retrain_args['gated_weight'], map_location=torch.device('cpu'))
+        model.load_state_dict(gated_weight['model'], strict=True)
+        model.fix_gate()
+        logger.log_text(str(model))
+        
+        gated_block_p, ds_param, total_param = model.compute_subnetwork_size()
+        
+        sum_ds = float(sum(ds_param))
+        sum_total = float(sum(total_param)) + sum_ds
+        for data, params in gated_block_p.items():
+            sump = sum(params).detach().numpy()
+            lines = f"{data} gated parameters:"
+            lines += f" {round(sump*(1e-6) + sum_ds*(1e-6), 3)}M/{round(sum_total*(1e-6), 3)}M"
+            logger.log_text(lines)
+    
+    else: 
+        setattr(model, 'retrain_phase', False)
     
     optimizer = get_optimizer(args, model)
-    
     logger.log_text(f"Optimizer:\n{optimizer}")
     logger.log_text(f"Apply AMP: {args.amp}")
     scaler = torch.cuda.amp.GradScaler() if args.amp else None
@@ -124,12 +151,33 @@ def main(args):
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         model = torch.nn.parallel.DistributedDataParallel(model,
                                                           device_ids=[args.gpu])
-        # print(model)
-        # exit()
         model_without_ddp = model.module
         
     else:
         model.cuda()
+        
+    
+    # checkpoint = {
+    #                 "model": model_without_ddp.state_dict(),
+    #                 "optimizer": optimizer.state_dict(),
+    #             }
+    
+    # root = "/root/volume/exp/resnet50_fasterrcnn_fcn/triple/cifar10_minicoco_voc/gating/baseline/nGPU4_multi_adamw_lr1e-5_gamma0.1_[Ret]SepBlockIden_SW0002_Temp5G08_ReLU/ckpts/"
+    # save_file = root + "tmp.pth"
+    # metric_utils.save_on_master(checkpoint, save_file)
+    
+    # load_weight = "/root/volume/exp/resnet50_fasterrcnn_fcn/triple/cifar10_minicoco_voc/gating/baseline/nGPU4_multi_adamw_lr1e-5_gamma0.1_[Ret]SepBlockIden_SW0002_Temp5G08_ReLU/ckpts/tmp.pth"
+    
+    # ckpt = torch.load(load_weight, map_location='cpu')
+    # model.module.load_state_dict(ckpt['model'])
+    # optimizer.load_state_dict(ckpt['optimizer'])
+    
+    
+    
+    
+    # exit()
+        
+    
         
     logger.log_text(f"Model Configuration:\n{model}")
     metric_utils.get_params(model, logger, False)
@@ -150,9 +198,11 @@ def main(args):
 
         try:
             checkpoint = torch.load(ckpt, map_location="cpu")
-            # checkpoint['model'] = {k: v for k, v in checkpoint['model'].items() if 'policys' not in k}
             
-            model_without_ddp.load_state_dict(checkpoint["model"], strict=False)
+            # if args.retrain_phase:
+            #     checkpoint['model'] = {k: v for k, v in checkpoint['model'].items() if 'task_gating_params' not in k}
+            model_without_ddp.load_state_dict(checkpoint["model"], strict=True)
+            
             optimizer.load_state_dict(checkpoint["optimizer"])
             
             if 'gamma' in checkpoint['lr_scheduler']:
@@ -246,8 +296,6 @@ def main(args):
         if args.resume_tmp:
             args.resume_tmp = False
 
-    
-    
     if args.start_epoch <= args.warmup_epoch:
         if args.warmup_epoch > 1:
             args.warmup_ratio = 1
@@ -402,16 +450,17 @@ def main(args):
             tb_logger.update_scalars(
                 logged_data, epoch, proc='val'
             ) 
-              
-        if args.save_all_epoch:
-            save_file = os.path.join(args.output_dir, 'ckpts', f"ckpt_{epoch}e.pth")
-        else:
-            save_file = os.path.join(args.output_dir, 'ckpts', f"checkpoint.pth")
         
-        logger.log_text("Saving in all epoch?", args.save_all_epoch)
         logger.log_text("Save model checkpoint...")
+        save_file = os.path.join(args.output_dir, 'ckpts', f"checkpoint.pth")
         metric_utils.save_on_master(checkpoint, save_file)
         logger.log_text("Complete saving checkpoint!\n")
+        
+        if args.save_all_epoch:
+            save_file = os.path.join(args.output_dir, 'ckpts', f"ckpt_{epoch}e.pth")
+            logger.log_text("Save per epoch checkpoint...")
+            metric_utils.save_on_master(checkpoint, save_file)
+            logger.log_text("Complete saving checkpoint!\n")
         
         
         # logger.log_text("Save model checkpoint...")

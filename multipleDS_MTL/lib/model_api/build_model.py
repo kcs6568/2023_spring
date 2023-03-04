@@ -63,7 +63,7 @@ def build_model(args):
         
         elif args.method == 'gating':
             if args.approach == 'baseline':
-                args.baseline_args['gate_args']['decay_settings']['max_iter'] = args.epochs * max(args.ds_size)
+                args.baseline_args['gate_args']['decay_settings']['max_iter'] = max(args.ds_size)
                 model_args.update({k: v for k, v in args.baseline_args.items()})
                 from .task_model.gating import GateMTL as Model
                 
@@ -74,7 +74,7 @@ def build_model(args):
                     
         if args.method == 'gating_ddp':
             if args.approach == 'baseline':
-                args.baseline_args['gate_args']['decay_settings']['max_iter'] = args.epochs * max(args.ds_size)
+                args.baseline_args['gate_args']['decay_settings']['max_iter'] = max(args.ds_size)
                 model_args.update({k: v for k, v in args.baseline_args.items()})
                 from .task_model.gating_ddp import GateMTLDDP as Model
                 

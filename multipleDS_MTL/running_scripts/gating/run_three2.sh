@@ -9,7 +9,7 @@ TRAIN_ROOT=/root/2023_spring/multipleDS_MTL
 KILL_PROC="kill $(ps aux | grep gating_train.py | grep -v grep | awk '{print $2}')"
 TRAIN_FILE=gating_train.py
 TRAIN_SCRIPT=$TRAIN_ROOT/$TRAIN_FILE
-$KILL_PROC
+# $KILL_PROC
 # exit 1 
 
 
@@ -49,11 +49,11 @@ fi
 
 CFG_PATH=$TRAIN_ROOT/cfgs/three_task/gating/cifar10_minicoco_voc/$YAML_CFG
 
-SCH="cosine"
+SCH="multi cosine"
 OPT="adamw"
 LR="1e-4"
 GAMMA="0.1"
-ADD_DISC="notAMP_WM06_UWneg05_SP005"
+ADD_DISC="SepBlockIden_SW0002_Temp5G08_ReLU_WM2"
 
 for sch in $SCH
 do
@@ -76,9 +76,9 @@ do
                 CUDA_VISIBLE_DEVICES=$DEVICES torchrun --nproc_per_node=$4 --master_port=$1 \
                     $TRAIN_SCRIPT --general \
                     --cfg $CFG_PATH \
-                    --warmup-ratio 0.6 --workers 4 --grad-clip-value 1 \
-                    --exp-case $exp_case --approach $2 --grad-to-none \
-                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma
+                    --warmup-ratio -1 --workers 4 --grad-clip-value 1 \
+                    --exp-case $exp_case --approach $2 --grad-to-none --amp \
+                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --save-all-epoch --resume
 
                 sleep 5
 

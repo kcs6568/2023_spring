@@ -4,12 +4,12 @@ METHOD=$2
 START_GPU=$3
 NUM_GPU=$4
 BACKBONE=$5
-TRAIN_ROOT=/root/2023_spring/multipleDS_MTL
+TRAIN_ROOT=/root/src/gated_mtl/
 
-KILL_PROC="kill $(ps aux | grep gating_train.py | grep -v grep | awk '{print $2}')"
-TRAIN_FILE=gating_train.py
+KILL_PROC="kill $(ps aux | grep static_train2.py | grep -v grep | awk '{print $2}')"
+TRAIN_FILE=static_train2.py
 TRAIN_SCRIPT=$TRAIN_ROOT/$TRAIN_FILE
-# $KILL_PROC
+$KILL_PROC
 # exit 1 
 
 
@@ -44,16 +44,17 @@ done
 
 if [ $5 = resnet50 ]
 then
-    YAML_CFG=resnet50_clf_det_seg_$2.yaml
+    YAML_CFG=resnet50_clf_det_seg_$2_2.yaml
 fi
 
-CFG_PATH=$TRAIN_ROOT/cfgs/three_task/gating/cifar10_minicoco_voc/$YAML_CFG
+CFG_PATH=/root/src/gated_mtl/cfgs/four_task/static/cifar10_stl10_minicoco_voc/$YAML_CFG
+
 
 SCH="multi"
 OPT="adamw"
-LR="1e-4"
-GAMMA="0.8"
-ADD_DISC="[Ret]SepBlockIden_SW0002_Temp5G08_ReLU"
+LR="1e-3"
+GAMMA="0.1"
+ADD_DISC="AMP_general_fromScratch"
 
 for sch in $SCH
 do
@@ -78,7 +79,7 @@ do
                     --cfg $CFG_PATH \
                     --warmup-ratio -1 --workers 4 --grad-clip-value 1 \
                     --exp-case $exp_case --approach $2 --grad-to-none --amp \
-                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --save-all-epoch --resume
+                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --resume
 
                 sleep 5
 

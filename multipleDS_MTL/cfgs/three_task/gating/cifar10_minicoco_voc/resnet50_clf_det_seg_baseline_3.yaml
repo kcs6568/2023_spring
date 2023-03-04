@@ -79,21 +79,13 @@ baseline_args:
       temperature: 5
       gamma: 0.8 # decaying factor
     is_hardsampling: False
-    sparsity_weight: 0.002
+    sparsity_weight: 0.08
     label_smoothing_alpha: null
-  seperate_features: True
+  seperate_features: False
   
 activation_function: relu
+retrain_phase: False
 
-
-retrain_phase: True
-retrain_args:
-  epoch: 8
-  optimizer: adamw
-  scheduler: step
-  step_size: 1
-  # scheduler_step: [3, 6]
-  gated_weight: /root/volume/exp/resnet50_fasterrcnn_fcn/triple/cifar10_minicoco_voc/gating/baseline/nGPU4_multi_adamw_lr1e-4_gamma0.1_SepBlockIden_SW0002_Temp5G08_ReLU/ckpts/ckpt_7e.pth
 
 loss_ratio: null
 epochs: 8

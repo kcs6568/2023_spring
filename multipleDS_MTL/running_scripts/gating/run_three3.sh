@@ -12,7 +12,6 @@ TRAIN_SCRIPT=$TRAIN_ROOT/$TRAIN_FILE
 # $KILL_PROC
 # exit 1 
 
-
 # make visible devices order automatically
 DEVICES=""
 d=$(($3-$4))
@@ -44,7 +43,7 @@ done
 
 if [ $5 = resnet50 ]
 then
-    YAML_CFG=resnet50_clf_det_seg_$2.yaml
+    YAML_CFG=resnet50_clf_det_seg_$2_3.yaml
 fi
 
 CFG_PATH=$TRAIN_ROOT/cfgs/three_task/gating/cifar10_minicoco_voc/$YAML_CFG
@@ -52,8 +51,8 @@ CFG_PATH=$TRAIN_ROOT/cfgs/three_task/gating/cifar10_minicoco_voc/$YAML_CFG
 SCH="multi"
 OPT="adamw"
 LR="1e-4"
-GAMMA="0.8"
-ADD_DISC="[Ret]SepBlockIden_SW0002_Temp5G08_ReLU"
+GAMMA="0.1"
+ADD_DISC="nonSepBlockIden_SW005_Temp5G08_ReLU"
 
 for sch in $SCH
 do

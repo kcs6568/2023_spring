@@ -8,3 +8,4 @@ BACKBONE=$5
 
 ./run_three2.sh 6006 baseline 3 4 resnet50
 sleep 10
+
