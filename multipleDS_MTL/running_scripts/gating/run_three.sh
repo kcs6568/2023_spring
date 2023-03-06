@@ -52,8 +52,8 @@ CFG_PATH=$TRAIN_ROOT/cfgs/three_task/gating/cifar10_minicoco_voc/$YAML_CFG
 SCH="multi"
 OPT="adamw"
 LR="1e-4"
-GAMMA="0.8"
-ADD_DISC="[Ret]SepBlockIden_SW0002_Temp5G08_ReLU"
+GAMMA="0.1"
+ADD_DISC="GradFilter_SW0001_noAMP_LS04"
 
 for sch in $SCH
 do
@@ -77,8 +77,8 @@ do
                     $TRAIN_SCRIPT --general \
                     --cfg $CFG_PATH \
                     --warmup-ratio -1 --workers 4 --grad-clip-value 1 \
-                    --exp-case $exp_case --approach $2 --grad-to-none --amp \
-                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --save-all-epoch --resume
+                    --exp-case $exp_case --approach $2 --grad-to-none \
+                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --resume
 
                 sleep 5
 

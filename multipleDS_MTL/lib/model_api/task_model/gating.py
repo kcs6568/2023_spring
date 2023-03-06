@@ -79,7 +79,7 @@ class GateMTL(nn.Module):
         
         # self.blocks = nn.ModuleList(self.blocks)
         # self.ds = nn.ModuleList(self.ds)
-        # self.fpn = backbone_network.fpn
+        self.fpn = backbone_network.fpn
         
         self.stem_dict = nn.ModuleDict()
         self.head_dict = nn.ModuleDict()
@@ -101,7 +101,6 @@ class GateMTL(nn.Module):
             'activation_function': kwargs['activation_function']
         }
         
-        # stem_weight = kwargs['state_dict']['stem']
         for data, cfg in task_cfg.items():
             data_list.append(data)
             self.return_layers.update({data: cfg['return_layers']})
@@ -131,15 +130,21 @@ class GateMTL(nn.Module):
                 stem = DetStem(**stem_cfg)
                 
                 head_cfg.update({'num_anchors': len(backbone_network.body.return_layers)+1})
-                detection = build_detector(
+                
+                head = build_detector(
                     backbone, detector, 
                     backbone_network.fpn_out_channels, num_classes, **head_cfg)
                 
-                if backbone_network.fpn is not None:
-                    head = nn.ModuleDict({
-                        'fpn': backbone_network.fpn,
-                        'detector': detection
-                    })
+                
+                # detection = build_detector(
+                #     backbone, detector, 
+                #     backbone_network.fpn_out_channels, num_classes, **head_cfg)
+                
+                # if backbone_network.fpn is not None:
+                #     head = nn.ModuleDict({
+                #         'fpn': backbone_network.fpn,
+                #         'detector': detection
+                #     })
             
             elif task == 'seg':
                 stem = SegStem(**stem_cfg)
@@ -149,7 +154,6 @@ class GateMTL(nn.Module):
             self.stem_dict.update({data: stem})
             self.head_dict.update({data: head})
         
-        # print(kwargs['static_weight'])
         if 'static_weight' in kwargs:
             static_weight = torch.load(kwargs['static_weight'], map_location="cpu")['model']
             self.load_state_dict(static_weight, strict=True)
@@ -160,7 +164,6 @@ class GateMTL(nn.Module):
         self.current_iters = 0
         
         wm_args = kwargs['weight_method']
-        print(wm_args)
         if wm_args is not None:
             wm_type = wm_args.pop('type')
             kw = {'task_list': self.data_list}
@@ -170,12 +173,246 @@ class GateMTL(nn.Module):
             self.wm = None
             
         self.seperate_features = kwargs['seperate_features']
-            
+        self.each_param_numel = self._compute_shared_encoder_numel
+        
+        self.sim_function = nn.CosineSimilarity(dim=0)
+        self.sim_function2 = nn.CosineSimilarity(dim=1)
     
     @property
     def get_gate_policy(self):
         return self.task_gating_params
     
+    
+    @property
+    def _compute_shared_encoder_numel(self):
+        all_numel = []
+        
+        # for p in self.get_shared_encoder.parameters():
+        #     each_numel.append(p.data.numel())
+        
+        block = self.encoder['block']
+        for layer_idx, num_blocks in enumerate(self.num_per_block):
+            for block_idx in range(num_blocks):
+                block_numel = []
+                for p in block[layer_idx][block_idx].parameters():
+                    block_numel.append(p.data.numel())
+                all_numel.append(block_numel)
+        
+        assert len(all_numel) == sum(self.num_per_block)
+        return all_numel
+    
+    
+    def _grad2vec(self, block_idx, block_module):
+        grad = torch.zeros(sum(self.each_param_numel[block_idx]))
+        count = 0
+        for n, param in block_module.named_parameters():
+            if param.grad is not None:
+                beg = 0 if count == 0 else sum(self.each_param_numel[block_idx][:count])
+                end = sum(self.each_param_numel[block_idx][:(count+1)])
+                grad[beg:end] = param.grad.data.view(-1)
+            count += 1
+        return grad
+    
+    
+    def collect_shared_grad2vec(self):
+        shared_grad2vec = []
+        # for dset, feat in data.items():
+        block_count=0
+        for layer_idx, num_blocks in enumerate(self.num_per_block):
+            for block_idx in range(num_blocks):
+                block_module = self.encoder['block'][layer_idx][block_idx]
+                # block_grad2vec = self._grad2vec(block_count, block_module)
+                shared_grad2vec.append(self._grad2vec(block_count, block_module).clone())
+                block_count += 1
+
+        return shared_grad2vec
+    
+    # def compute_sim(self):
+    #     shared_grad2vec = self.collect_shared_grad2vec()
+        
+    #     for block_idx in range(sum(self.num_per_block)):
+    #         print("block_idx:", block_idx)
+    #         print("***"*60)
+    #         # norm_block_grad = torch.div(shared_grad2vec[block_idx], shared_grad2vec[block_idx].norm()).cuda()
+    #         norm_block_grad = shared_grad2vec[block_idx].cuda()
+    #         for data in self.data_list:
+    #             print(data)
+    #             print("==="*20)
+    #             grad_clone = self.task_gating_params[data].grad[block_idx].clone()
+    #             # print(block_grad)
+    #             # print(grad_clone)
+    #             # print(self.task_gating_params[data].grad)
+    #             # print(self.task_gating_params[data][block_idx])
+    #             # print(self.task_gating_params[data].grad[block_idx])
+    #             # print(self.task_gating_params[data].grad[block_idx][0])
+    #             # exit()
+    #             print(grad_clone)
+    #             print(norm_block_grad)
+    #             task_grad = torch.ones_like(norm_block_grad).cuda() * grad_clone[0]
+    #             print(task_grad)
+    #             task_sim = self.sim_function(norm_block_grad, task_grad)
+    #             print(task_sim, torch.neg(task_sim))
+    #             grad_clone[0] *= task_sim
+                
+    #             print(norm_block_grad)
+    #             task_grad = torch.ones_like(norm_block_grad).cuda() * grad_clone[1]
+    #             print(task_grad)
+    #             task_sim = self.sim_function(norm_block_grad, task_grad)
+    #             print(task_sim, torch.neg(task_sim))
+    #             grad_clone[1] *= task_sim
+                
+                
+    #             print(grad_clone)
+    #             self.task_gating_params[data].grad[block_idx].data = grad_clone
+    #             print()
+    #             print(self.task_gating_params[data].grad)
+    #         print()
+    #         print()
+    #     exit()
+    
+    # def compute_sim(self):
+        # for data in self.data_list: print(self.task_gating_params[data].grad)
+        # task_head_norm = []
+        # for data, head in self.head_dict.items():
+        #     head_norm = 0
+        #     for p in head.parameters(): head_norm += p.grad.norm()
+        #     task_head_norm.append(head_norm)
+            
+        # print(task_head_norm)
+        
+        
+        
+        # block_norm = torch.zeros(sum(self.num_per_block)).cuda()
+        # block_count=0
+        # for layer_idx, num_blocks in enumerate(self.num_per_block):
+        #     for block_idx in range(num_blocks):
+        #         block = self.encoder['block'][layer_idx][block_idx]
+        #         norm = 0
+                
+        #         block_use = []
+        #         block_skip = []
+        #         for data in self.data_list:
+        #             task_sim = []
+        #             task_nonsim = []
+        #             gate_grad_clone = self.task_gating_params[data].grad[block_count].clone()
+                    
+        #             for n, p in block.named_parameters():
+        #                 use_grad = torch.ones_like(p.grad).cuda() * gate_grad_clone[0]
+        #                 skip_grad = torch.ones_like(p.grad).cuda() * gate_grad_clone[1]
+                        
+        #                 sim = self.sim_function(p.grad, use_grad)
+        #                 task_sim.append(sim.mean())
+                        
+        #                 norm += p.grad.norm()
+        #                 sim = self.sim_function(p.grad, skip_grad)
+        #                 task_nonsim.append(sim.mean())
+                    
+        #             if block_norm[block_count] == 0:
+        #                 print(block_count, norm)
+        #                 block_norm[block_count] = norm
+                    
+                    
+
+        #             use_grad = torch.stack(task_sim).mean(0)
+        #             skip_grad = torch.stack(task_nonsim).mean(0)
+        #             # mean_use = use_grad.mean(0)
+        #             block_use.append(use_grad)
+        #             block_skip.append(skip_grad)
+                
+        #         for idx, data in enumerate(self.data_list):
+        #             self.task_gating_params[data].grad[block_count, 0] *= ((block_norm[block_count]/task_head_norm[idx]) * block_use[idx])
+        #             self.task_gating_params[data].grad[block_count, 1] *= ((block_norm[block_count]/task_head_norm[idx]) * block_skip[idx])
+        #             # self.task_gating_params[data].grad[block_count, 0] = gate_grad_clone[0] * mean_use
+        #         # self.task_gating_params[data].grad[block_count, 1] = gate_grad_clone[1] * mean_skip
+                
+        #         # sim_prob = torch.softmax(torch.stack(block_use), dim=0)
+        #         # # print(block_count, block_use, sim_prob)
+        #         # for idx, data in enumerate(self.data_list): 
+        #         #     self.task_gating_params[data].grad[block_count, 0] *= sim_prob[idx]
+        #         #     self.task_gating_params[data].grad[block_count, 1] *= (1-sim_prob[idx])
+                    
+        #         block_count += 1
+        
+        
+        # for data in self.data_list: print(self.task_gating_params[data].grad)
+        
+        
+        # exit()
+        
+            
+            
+            # for n, p in block.named_parameters():
+            #     task_sim = []
+            #     task_nonsim = []
+            #     grad = p.grad.clone().cuda()
+            #     for data in self.data_list:
+            #         if block_idx == 0: print(self.task_gating_params[data].grad[block_idx])
+                    
+            #         gate_grad_clone = self.task_gating_params[data].grad[block_idx].clone()
+            #         gate_grad = torch.ones_like(grad).cuda() * gate_grad_clone[0]
+            #         sim = self.sim_function(grad, gate_grad)
+            #         task_sim.append(sim.mean())
+                    
+            #         gate_grad = torch.ones_like(grad).cuda() * gate_grad_clone[1]
+            #         sim = self.sim_function(grad, gate_grad)
+            #         task_nonsim.append(sim.mean())
+            
+            #     block_sim.append(torch.stack(task_sim))
+            #     block_nonsim.append(torch.stack(task_nonsim))
+            
+            # block_sim = torch.stack(block_sim)
+            # block_nonsim = torch.stack(block_nonsim)
+            
+            # meansim = block_sim.mean(0)
+            # meannonsim = block_nonsim.mean(0)
+            
+            # self.task_gating_params[data].grad[block_idx][0] = 
+            
+            
+            
+            
+                
+                
+            
+        
+        
+    
+        # for n, p in self.encoder['block'].named_parameters():
+        #     for data in self.data_list:
+        #         origin_grad = self._grad2vec()
+        #         gate_grad = torch.ones_like(origin_grad).cuda() * self.task_gating_params[data][0]
+        #         cos_sim = self.sim_function(origin_grad, gate_grad)
+            
+            
+            
+            
+        # pcgrad = {k: origin_grad.clone().cuda() for k in self.data_list}
+    
+    
+    def compute_sim(self):
+        block_count=0
+        for layer_idx, num_blocks in enumerate(self.num_per_block):
+            for block_idx in range(num_blocks):
+                block = self.encoder['block'][layer_idx][block_idx]
+                
+                for p in block.parameters():
+                    # masks = torch.zeros([len(self.data_list)] + list(p.shape)).cuda()
+                    
+                    # max_gate = float('inf')
+                    max_gate = float('-inf')
+                    for idx, data in enumerate(self.data_list):
+                        # print(data, self.task_gating_params[data].grad[block_count, 0])
+                        if max_gate == float('-inf'): max_gate = torch.abs(self.task_gating_params[data].grad[block_count, 0])
+                        if torch.abs(self.task_gating_params[data].grad[block_count, 0]) < max_gate:
+                            max_gate = torch.abs(self.task_gating_params[data].grad[block_count, 0])
+                    # print(max_gate)
+                    #     print(torch.abs(self.task_gating_params[data].grad[block_count, 0]))
+                    #     masks[idx] = (torch.abs(p.grad) > torch.abs(self.task_gating_params[data].grad[block_count, 0])).int()
+                    # filtered_masks = torch.sum(masks, dim=0)
+                    # p.grad.data *= filtered_masks
+                    filtered_masks = (torch.abs(p.grad) < max_gate).int()
+                    p.grad.data *= filtered_masks
+                    
     
     def fix_gate(self):
         layer_count = []
@@ -227,7 +464,6 @@ class GateMTL(nn.Module):
             ds = 0
             for ds_p in self.encoder['ds'][ds_idx].parameters():
                 ds += ds_p.numel()
-                print(ds)
             ds_param.append(ds)
 
         return task_block_params, ds_param, total_block_params
@@ -378,10 +614,15 @@ class GateMTL(nn.Module):
                 losses = head(back_feats, targets)
                 
             elif task == 'det':
-                fpn_feat = head['fpn'](back_feats)
-                losses = head['detector'](data_dict[dset][0], fpn_feat,
+                fpn_feat = self.fpn(back_feats)
+                losses = head(data_dict[dset][0], fpn_feat,
                                         self.stem_dict[dset].transform, 
                                     origin_targets=targets)
+                
+                # fpn_feat = head['fpn'](back_feats)
+                # losses = head['detector'](data_dict[dset][0], fpn_feat,
+                #                         self.stem_dict[dset].transform, 
+                #                     origin_targets=targets)
                 
             elif task == 'seg':
                 losses = head(
@@ -410,8 +651,11 @@ class GateMTL(nn.Module):
         back_feats = backbone_feats[dset]
                 
         if task == 'det':
-            fpn_feat = head['fpn'](back_feats)
-            predictions = head['detector'](data_dict[dset][0], fpn_feat, self.stem_dict[dset].transform)
+            fpn_feat = self.fpn(back_feats)
+            predictions = head(data_dict[dset][0], fpn_feat, self.stem_dict[dset].transform)
+            
+            # fpn_feat = head['fpn'](back_feats)
+            # predictions = head['detector'](data_dict[dset][0], fpn_feat, self.stem_dict[dset].transform)
             
         else:
             if task == 'seg':
@@ -426,73 +670,73 @@ class GateMTL(nn.Module):
         return predictions
     
              
-        if self.training:
-            for dset, back_feats in backbone_feats.items():
-                task = other_hyp["task_list"][dset]
-                head = self.head_dict[dset]
+        # if self.training:
+        #     for dset, back_feats in backbone_feats.items():
+        #         task = other_hyp["task_list"][dset]
+        #         head = self.head_dict[dset]
                 
-                targets = data_dict[dset][1]
+        #         targets = data_dict[dset][1]
                 
-                if task == 'clf':
-                    losses = head(back_feats, targets)
+        #         if task == 'clf':
+        #             losses = head(back_feats, targets)
                     
-                elif task == 'det':
-                    fpn_feat = head['fpn'](back_feats)
-                    losses = head['detector'](data_dict[dset][0], fpn_feat,
-                                            self.stem_dict[dset].transform, 
-                                        origin_targets=targets)
+        #         elif task == 'det':
+        #             fpn_feat = head['fpn'](back_feats)
+        #             losses = head['detector'](data_dict[dset][0], fpn_feat,
+        #                                     self.stem_dict[dset].transform, 
+        #                                 origin_targets=targets)
                     
-                elif task == 'seg':
-                    losses = head(
-                        back_feats, targets, input_shape=targets.shape[-2:])
+        #         elif task == 'seg':
+        #             losses = head(
+        #                 back_feats, targets, input_shape=targets.shape[-2:])
                 
-                losses = {f"feat_{dset}_{k}": l for k, l in losses.items()}
-                total_losses.update(losses)
+        #         losses = {f"feat_{dset}_{k}": l for k, l in losses.items()}
+        #         total_losses.update(losses)
                 
-            disjointed_loss = disjointed_policy_loss(
-                    self.task_gating_params, 
-                    sum(self.num_per_block), 
-                    smoothing_alpha=self.label_smoothing_alpha)
+        #     disjointed_loss = disjointed_policy_loss(
+        #             self.task_gating_params, 
+        #             sum(self.num_per_block), 
+        #             smoothing_alpha=self.label_smoothing_alpha)
             
-            # if self.wm is not None:
-            #     print("=="*60)
-            #     print(total_losses)
-            #     print(disjointed_loss)
-            #     assert isinstance(disjointed_loss, (dict, OrderedDict))
-            #     wm_gate_loss = self.wm(disjointed_loss)
-            #     print(wm_gate_loss)
-            #     print("||"*60)
-            #     total_losses.update({f"Sparse{self.wm.method_name}_{k}": l for k, l in wm_gate_loss.items()})    
-            # else:
-            #     total_losses.update({"disjointed": disjointed_loss * self.sparsity_weight})
-            total_losses.update({"sparsity": disjointed_loss * self.sparsity_weight})
+        #     # if self.wm is not None:
+        #     #     print("=="*60)
+        #     #     print(total_losses)
+        #     #     print(disjointed_loss)
+        #     #     assert isinstance(disjointed_loss, (dict, OrderedDict))
+        #     #     wm_gate_loss = self.wm(disjointed_loss)
+        #     #     print(wm_gate_loss)
+        #     #     print("||"*60)
+        #     #     total_losses.update({f"Sparse{self.wm.method_name}_{k}": l for k, l in wm_gate_loss.items()})    
+        #     # else:
+        #     #     total_losses.update({"disjointed": disjointed_loss * self.sparsity_weight})
+        #     total_losses.update({"sparsity": disjointed_loss * self.sparsity_weight})
             
             
                 
-            return total_losses
+        #     return total_losses
             
-        else:
-            dset = list(other_hyp["task_list"].keys())[0]
-            task = list(other_hyp["task_list"].values())[0]
-            head = self.head_dict[dset]
+        # else:
+        #     dset = list(other_hyp["task_list"].keys())[0]
+        #     task = list(other_hyp["task_list"].values())[0]
+        #     head = self.head_dict[dset]
             
-            back_feats = backbone_feats[dset]
+        #     back_feats = backbone_feats[dset]
                     
-            if task == 'det':
-                fpn_feat = head['fpn'](back_feats)
-                predictions = head['detector'](data_dict[dset][0], fpn_feat, self.stem_dict[dset].transform)
+        #     if task == 'det':
+        #         fpn_feat = head['fpn'](back_feats)
+        #         predictions = head['detector'](data_dict[dset][0], fpn_feat, self.stem_dict[dset].transform)
                 
-            else:
-                if task == 'seg':
-                    predictions = head(
-                        back_feats, input_shape=data_dict[dset][0].shape[-2:])
+        #     else:
+        #         if task == 'seg':
+        #             predictions = head(
+        #                 back_feats, input_shape=data_dict[dset][0].shape[-2:])
             
-                else:
-                    predictions = head(back_feats)
+        #         else:
+        #             predictions = head(back_feats)
                 
-                predictions = dict(outputs=predictions)
+        #         predictions = dict(outputs=predictions)
             
-            return predictions
+        #     return predictions
         
 
     def forward(self, data_dict, kwargs):

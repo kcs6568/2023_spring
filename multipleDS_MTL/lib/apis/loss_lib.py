@@ -235,6 +235,7 @@ def disjointed_policy_loss(gate_logits, num_blocks, smoothing_alpha=None):
     loss = 0.
     if smoothing_alpha is not None:
         gt_ = torch.ones(num_blocks, 2).long().cuda()
+        gt_[:, 0] = 0
         gt = torch.tensor([[l*(1-smoothing_alpha) + smoothing_alpha/len(oh) for l in oh] for i, oh in enumerate(gt_)]).float().cuda()
         
     else:

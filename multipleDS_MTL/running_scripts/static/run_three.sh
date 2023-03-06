@@ -49,11 +49,11 @@ fi
 
 CFG_PATH=$TRAIN_ROOT/cfgs/three_task/static/cifar10_minicoco_voc/$YAML_CFG
 
-SCH="cosine"
+SCH="multi"
 OPT="adamw"
 LR="1e-4"
 GAMMA="0.1"
-ADD_DISC="all_epoch_save_notAMP_freezeBN"
+ADD_DISC="origin_code_setting"
 
 for sch in $SCH
 do

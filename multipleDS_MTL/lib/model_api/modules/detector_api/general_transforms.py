@@ -4,7 +4,7 @@ import torchvision
 
 from torch import nn, Tensor
 from typing import List, Tuple, Dict, Optional
-
+import torchvision.transforms.functional as tv_F
 from .image_list import ImageList
 from .roi_heads import paste_masks_in_image
 
@@ -83,6 +83,8 @@ class GeneralizedRCNNTransform(nn.Module):
         self.image_std = torch.as_tensor(image_std)[:, None, None].cuda()
         self.size_divisible = size_divisible
         self.fixed_size = fixed_size
+        
+        self.save_origin_size = []
 
     def forward(self,
                 images: List[Tensor],
@@ -210,6 +212,43 @@ class GeneralizedRCNNTransform(nn.Module):
                 maxes[index] = max(maxes[index], item)
         return maxes
 
+    
+    def match_all_batches(self, images: List[Tensor]):
+        self.save_origin_size = [list(img.shape) for img in images]
+        # max_size = self.max_by_axis([list(img.shape) for img in images])
+        
+        max_size = self.max_by_axis(self.save_origin_size)
+        # print(max_size)
+        batch_shape = [len(images)] + max_size
+        # print(batch_shape)
+        # print(images[0].size())
+        batched_imgs = images[0].new_full(batch_shape, 0)
+        # print(batched_imgs)
+        # print(batched_imgs.size())
+        for idx, img in enumerate(images):
+            if img.shape[-2:] == max_size[-2:]: continue
+            batched_imgs[idx] = tv_F.crop(img, 0, 0, max_size[-2], max_size[-1])
+            # print(idx, img.size(), batched_imgs[idx].size())
+            
+        return batched_imgs
+        
+        
+    def recover_all_batches(self, images, start, end):
+        batches_shape = self.save_origin_size[start:end]
+        # print(batches_shape)
+        
+        batch_lists = []
+        for idx, shapes in enumerate(batches_shape):
+            if shapes == images[idx].shape[-2:]: continue
+            # print(shapes)
+            new_sample = tv_F.crop(images[idx], 0, 0, shapes[-2], shapes[-1])
+            # print(new_sample.size())
+            batch_lists.append(new_sample)
+            
+        return batch_lists
+    
+        
+    
     def batch_images(self, images: List[Tensor], size_divisible: int = 32) -> Tensor:
         if torchvision._is_tracing():
             # batch_images() does not export well to ONNX
@@ -222,11 +261,13 @@ class GeneralizedRCNNTransform(nn.Module):
         max_size[1] = int(math.ceil(float(max_size[1]) / stride) * stride)
         max_size[2] = int(math.ceil(float(max_size[2]) / stride) * stride)
 
+        
         batch_shape = [len(images)] + max_size
         batched_imgs = images[0].new_full(batch_shape, 0)
         for i in range(batched_imgs.shape[0]):
             img = images[i]
             batched_imgs[i, : img.shape[0], : img.shape[1], : img.shape[2]].copy_(img)
+
 
         return batched_imgs
 
@@ -250,7 +291,8 @@ class GeneralizedRCNNTransform(nn.Module):
                 keypoints = resize_keypoints(keypoints, im_s, o_im_s)
                 result[i]["keypoints"] = keypoints
         return result
-
+    
+    
     def __repr__(self) -> str:
         format_string = self.__class__.__name__ + '('
         _indent = '\n    '

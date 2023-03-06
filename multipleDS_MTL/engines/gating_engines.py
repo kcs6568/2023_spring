@@ -28,6 +28,7 @@ def clipping_coeff(param_list):
     return clip_coef_clamped
 
 
+
 class LossCalculator:
     def __init__(self, type, data_cats, loss_ratio, task_weights=None, method='multi_task') -> None:
         self.type = type
@@ -189,6 +190,8 @@ def training(model, optimizer, data_loaders,
             # optimizer.zero_grad(set_to_none=args.grad_to_none)
             scaler.scale(losses).backward()
             
+            if args.filtering_method: model.module.compute_sim()
+            
             if args.grad_clip_value is not None:
                 scaler.unscale_(optimizer) # this must require to get clipped gradients.
                 torch.nn.utils.clip_grad_norm_( # clip gradient values to maximum 1.0
@@ -200,15 +203,29 @@ def training(model, optimizer, data_loaders,
             
         
         else:
-            losses.backward()
+            losses.backward(retain_graph=False)
             
+            if args.filtering_method: model.module.compute_sim()
+            
+            
+            
+            # print("iteration", i)
+            # for dset in datasets: print(f"{dset}:\n{torch.transpose(model.module.task_gating_params[dset].grad.clone().detach(), 0, 1)}\n")
             
             if args.grad_clip_value is not None:
                 # for p in model.parameters(): torch.clamp_(p.grad, min_grad, max_grad)
                 torch.nn.utils.clip_grad_norm_(
                     model.parameters(),
                     args.grad_clip_value)
+            
+            
+            # for dset in datasets: print(f"{dset}:\n{torch.transpose(model.module.task_gating_params[dset].grad.clone().detach(), 0, 1)}\n")
+            # for dset in datasets: print(f"{dset}:\n{torch.transpose(model.module.task_gating_params[dset].clone().detach(), 0, 1)}\n")
+            # print("***"*60)
+            
             optimizer.step()
+            
+            
             
                
         # for n, p in model.named_parameters():
@@ -239,13 +256,13 @@ def training(model, optimizer, data_loaders,
                 for dset in datasets: logger.log_text(f"{dset}:\n{torch.transpose(model.module.task_gating_params[dset].data.clone().detach(), 0, 1)}")
                 logger.log_text(f"Temperature: {model.module.decay_function.temperature}\n")
                 
-                if wm is not None:
-                    logger.log_text(f"{wm.method_name}_Params: {str(wm)}")
+            if wm is not None:
+                logger.log_text(f"{wm.method_name}_Params: {str(wm)}")
             
         if tb_logger:
             tb_logger.update_scalars(loss_dict_reduced, i)   
-            if not model.module.retrain_phase:
-                if wm is not None: tb_logger.update_scalars(wm.logsigma, i)
+            # if not model.module.retrain_phase:
+            if wm is not None: tb_logger.update_scalars(wm.logsigma, i)
 
             '''
             If the break block is in this block, the gpu memory will stuck (bottleneck)

@@ -142,24 +142,62 @@ def training(model, optimizer, data_loaders,
         input_set = metric_utils.preprocess_data(input_dicts, args.task_per_dset)
         
         for ddd, smp in input_set.items():
-            print(ddd)
-            # print(smp[0])
-            if isinstance(smp[0], list):
-                print(len(smp[0]))
-                print(smp[0][0].size())
-            else:
-                print(smp[0].size())
-            print()
+            # if not 'coco' in ddd:
+            #     print(smp[0])
+            #     print(smp[1])
+            if 'coco' in ddd:
+                reshape_imgs = model.module.stem_dict[ddd].transform.match_all_batches(smp[0])
+                input_set[ddd] = (reshape_imgs, smp[1])
+                print(input_set[ddd][0].size())
+                print(smp[1])
+                # print(reshape_imgs.size())
+                # exit()
+                # target = smp[1]
+                # target_keys = list(target[0].keys())
+                
+                # target_lists = []
+                # for t in target:
+                #     tensored_target = torch.stack(list(t.values()))
+                #     print(tensored_target)
+                    
+                #     target_lists.append(tensored_target)
+                
+                # target_lists = torch.stack(target_lists)
+                # print(target_lists)
+                # print(target_lists.size())
+                # exit()
+                
+                # tensored_target = torch.stack([torch.stack(list(t.values())) for t in target])
+                
+                
+                # print(tensored_target)
+                # for t in target:
+                #     print(t)
+                #     print("***"*30)
+                # exit()    
+            
+        
+        print("***"*60)
+        
+        # for ddd, smp in input_set.items():
+        #     print(ddd)
+        #     # print(smp[0])
+        #     if isinstance(smp[0], list):
+        #         print(len(smp[0]))
+        #         print(smp[0][0].size())
+        #     else:
+        #         print(smp[0].size())
+        #     print()
+        # # exit()
+        
+        # input_set['minicoco'][0] = torch.cat(input_set['minicoco'][0], dim=0)
+        
+        # for ddd, smp in input_set.items():
+        #     print(ddd)
+        #     print(type(smp[0]))
+        #     print(smp[0].size())
+        #     print()
         # exit()
-        
-        input_set['minicoco'][0] = torch.cat(input_set['minicoco'][0], dim=0)
-        
-        for ddd, smp in input_set.items():
-            print(ddd)
-            print(type(smp[0]))
-            print(smp[0].size())
-            print()
-        exit()
         
         
         

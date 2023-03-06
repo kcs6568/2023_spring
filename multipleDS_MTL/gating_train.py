@@ -115,7 +115,7 @@ def main(args):
             args.step_size = retrain_args['step_size']
         
         gated_weight = torch.load(retrain_args['gated_weight'], map_location=torch.device('cpu'))
-        model.load_state_dict(gated_weight['model'], strict=True)
+        model.load_state_dict(gated_weight['model'], strict=False)
         model.fix_gate()
         logger.log_text(str(model))
         

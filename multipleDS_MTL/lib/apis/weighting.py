@@ -304,7 +304,6 @@ class PCGrad(AbsWeighting):
     
     
 def define_weighting_method(weight_method, **kwargs):
-    print(weight_method, kwargs)
     if weight_method == 'uw':
         return UncertaintyWeights(**kwargs)
     elif weight_method == 'dwa':

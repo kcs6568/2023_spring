@@ -6,5 +6,5 @@ START_GPU=$3
 NUM_GPU=$4
 BACKBONE=$5
 
-./run_three2.sh 6006 baseline 3 4 resnet50
+./run_three2.sh 6006 baseline 7 3 resnet50
 sleep 10

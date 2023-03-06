@@ -151,7 +151,7 @@ def main(args):
         
         model = model.to("cuda")
         model = torch.nn.DataParallel(model, device_ids=rank_list)
-    
+        
     logger.log_text(f"Model Configuration:\n{model}")
     metric_utils.get_params(model, logger, False)
     

@@ -251,7 +251,6 @@ class FasterRCNN(nn.Module):
                     else:
                         torch._assert(False, f"Expected target boxes to be of type Tensor, got {type(boxes)}.")
 
-        original_image_sizes = self.get_original_size(origins)
         trs_images, trs_targets = trs_fn(origins, origin_targets)
         
         if trs_targets is not None:
@@ -274,7 +273,10 @@ class FasterRCNN(nn.Module):
         
         proposals, proposal_losses = self.rpn(trs_images, features, trs_targets)
         detections, detector_losses = self.roi_heads(features, proposals, trs_images.image_sizes, trs_targets)
-        detections = trs_fn.postprocess(detections, trs_images.image_sizes, original_image_sizes)
+        
+        if not self.training: 
+            original_image_sizes = self.get_original_size(origins)
+            detections = trs_fn.postprocess(detections, trs_images.image_sizes, original_image_sizes)
         
         losses = {}
         losses.update(detector_losses)

@@ -60,7 +60,7 @@ task_bs:
 
 baseline_args:
   is_hardsampling: False
-  backbone_type: origin
+  backbone_type: intermediate
   dilation_type: fft
   freeze_bn: True
   train_allbackbone: True

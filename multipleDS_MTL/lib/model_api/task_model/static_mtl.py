@@ -72,21 +72,48 @@ class StaticMTL(nn.Module):
             'ds': nn.ModuleList(ds)
         })
         
+        # self.blocks = []
+        # self.ds = []
+        # self.num_per_block = []
+
+        # for _, p in backbone_network.body.named_children():
+        #     block = []
+        #     self.num_per_block.append(len(p))
+        #     for m, q in p.named_children():
+        #         if m == '0':
+        #             self.ds.append(q.downsample)
+        #             q.downsample = None
+                
+        #         block.append(q)
+                
+        #     self.blocks.append(nn.ModuleList(block))
+                
+        # self.blocks = nn.ModuleList(self.blocks)
+        # self.ds = nn.ModuleList(self.ds)
+        
+        self.fpn = backbone_network.fpn
+        
+        
         self.stem_dict = nn.ModuleDict()
         self.head_dict = nn.ModuleDict()
         
         self.return_layers = {}
         data_list = []
         
+        if kwargs['backbone_weight'] is not None:
+            stem_weight = kwargs['stem_weight']
+        else:
+            stem_weight = None
+        
         shared_stem_configs = {
-            'activation_function': kwargs['activation_function']
+            'activation_function': kwargs['activation_function'],
+            'stem_weight': stem_weight
         }
         
         shared_head_configs = {
             'activation_function': kwargs['activation_function']
         }
         
-        # stem_weight = kwargs['state_dict']['stem']
         for data, cfg in task_cfg.items():
             data_list.append(data)
             self.return_layers.update({data: cfg['return_layers']})
@@ -116,15 +143,19 @@ class StaticMTL(nn.Module):
                 stem = DetStem(**stem_cfg)
                 
                 head_cfg.update({'num_anchors': len(backbone_network.body.return_layers)+1})
-                detection = build_detector(
+                head = build_detector(
                     backbone, detector, 
                     backbone_network.fpn_out_channels, num_classes, **head_cfg)
                 
-                if backbone_network.fpn is not None:
-                    head = nn.ModuleDict({
-                        'fpn': backbone_network.fpn,
-                        'detector': detection
-                    })
+                # detection = build_detector(
+                #     backbone, detector, 
+                #     backbone_network.fpn_out_channels, num_classes, **head_cfg)
+                
+                # if backbone_network.fpn is not None:
+                #     head = nn.ModuleDict({
+                #         'fpn': backbone_network.fpn,
+                #         'detector': detection
+                #     })
                 
             
             elif task == 'seg':
@@ -191,10 +222,15 @@ class StaticMTL(nn.Module):
                     losses = head(back_feats, targets)
                     
                 elif task == 'det':
-                    fpn_feat = head['fpn'](back_feats)
-                    losses = head['detector'](data_dict[dset][0], fpn_feat,
+                    fpn_feat = self.fpn(back_feats)
+                    losses = head(data_dict[dset][0], fpn_feat,
                                             self.stem_dict[dset].transform, 
                                         origin_targets=targets)
+                    
+                    # fpn_feat = head['fpn'](back_feats)
+                    # losses = head['detector'](data_dict[dset][0], fpn_feat,
+                    #                         self.stem_dict[dset].transform, 
+                    #                     origin_targets=targets)
                     
                 elif task == 'seg':
                     losses = head(
@@ -213,8 +249,11 @@ class StaticMTL(nn.Module):
             back_feats = backbone_feats[dset]
             
             if task == 'det':
-                fpn_feat = head['fpn'](back_feats)
-                predictions = head['detector'](data_dict[dset][0], fpn_feat, self.stem_dict[dset].transform)
+                fpn_feat = self.fpn(back_feats)
+                predictions = head(data_dict[dset][0], fpn_feat, self.stem_dict[dset].transform)
+                
+                # fpn_feat = head['fpn'](back_feats)
+                # predictions = head['detector'](data_dict[dset][0], fpn_feat, self.stem_dict[dset].transform)
                 
             else:
                 if task == 'seg':
@@ -234,14 +273,17 @@ class StaticMTL(nn.Module):
 
     def forward(self, data_dict, kwargs):
         for ddd, smp in data_dict.items():
-            print(ddd)
-            print(smp[0])
-            if isinstance(smp[0], list):
-                print(len(smp[0]))
-                print(smp[0][0].size())
-            else:
-                print(smp[0].size())
-            print()
-        exit()
+            if 'coco' in ddd:
+                count = smp[0].shape[0]
+                start = torch.cuda.current_device() * count
+                end = start + count
+                
+                reshaped_samples = self.stem_dict[ddd].transform.recover_all_batches(smp[0], start, end)
+                new_target = smp[1][start:end]
+                
+                data_dict[ddd] = (reshaped_samples, new_target)
+                # print(data_dict[ddd])
+                # exit()
+                
         
         return self.get_features(data_dict, kwargs)

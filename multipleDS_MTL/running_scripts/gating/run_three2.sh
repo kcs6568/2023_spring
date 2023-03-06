@@ -49,11 +49,11 @@ fi
 
 CFG_PATH=$TRAIN_ROOT/cfgs/three_task/gating/cifar10_minicoco_voc/$YAML_CFG
 
-SCH="multi cosine"
+SCH="multi"
 OPT="adamw"
 LR="1e-4"
 GAMMA="0.1"
-ADD_DISC="SepBlockIden_SW0002_Temp5G08_ReLU_WM2"
+ADD_DISC="GradFilter_SW00015_AMP_LS04"
 
 for sch in $SCH
 do
@@ -73,12 +73,13 @@ do
                     exp_case="$exp_case"_$ADD_DISC
                 fi
 
-                CUDA_VISIBLE_DEVICES=$DEVICES torchrun --nproc_per_node=$4 --master_port=$1 \
+                # CUDA_VISIBLE_DEVICES=$DEVICES torchrun --nproc_per_node=$4 --master_port=$1 \
+                CUDA_VISIBLE_DEVICES=4,5,7 torchrun --nproc_per_node=$4 --master_port=$1 \
                     $TRAIN_SCRIPT --general \
                     --cfg $CFG_PATH \
                     --warmup-ratio -1 --workers 4 --grad-clip-value 1 \
                     --exp-case $exp_case --approach $2 --grad-to-none --amp \
-                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --save-all-epoch --resume
+                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --resume
 
                 sleep 5
 

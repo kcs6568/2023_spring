@@ -70,8 +70,8 @@ baseline_args:
   bottleneck_type: default
   static_weight: /root/volume/exp/resnet50_fasterrcnn_fcn/triple/cifar10_minicoco_voc/static/baseline/[B]nGPU4_cosine_adamw_lr1e-4_all_epoch_save_notAMP_freezeBN_LeakyReLU/ckpts/ckpt_11e.pth
   weight_method:
-    type: uw
-    init_value: 2
+    type: null
+    init_value: 1.0
   # base_dataset: cifar10
   gate_args:
     decay_settings:
@@ -79,12 +79,22 @@ baseline_args:
       temperature: 5
       gamma: 0.8 # decaying factor
     is_hardsampling: False
-    sparsity_weight: 0.002
-    label_smoothing_alpha: null
+    sparsity_weight: 0.0015
+    label_smoothing_alpha: 0.4
   seperate_features: True
   
-activation_function: relu
+filtering_method: True
+activation_function: leakyrelu
+
 retrain_phase: False
+# retrain_args:
+#   epoch: 16
+#   optimizer: adamw
+#   scheduler: step
+#   step_size: 1
+#   gamma: 0.9
+#   # scheduler_step: [3, 6]
+#   gated_weight: /root/volume/exp/resnet50_fasterrcnn_fcn/triple/cifar10_minicoco_voc/gating/baseline/nGPU4_multi_adamw_lr1e-4_gamma0.1_SepBlockIden_SW0002_Temp5G08_ReLU/ckpts/ckpt_7e.pth
 
 loss_ratio: null
 epochs: 8

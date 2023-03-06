@@ -79,12 +79,22 @@ baseline_args:
       temperature: 5
       gamma: 0.8 # decaying factor
     is_hardsampling: False
-    sparsity_weight: 0.08
+    sparsity_weight: 0.0015
     label_smoothing_alpha: null
-  seperate_features: False
-  
-activation_function: relu
-retrain_phase: False
+  seperate_features: True
+
+filtering_method: False
+activation_function: leakyrelu
+
+retrain_phase: True
+retrain_args:
+  epoch: 16
+  optimizer: adamw
+  scheduler: step
+  step_size: 1
+  gamma: 0.92
+  # scheduler_step: [3, 6]
+  gated_weight: /root/volume/exp/resnet50_fasterrcnn_fcn/triple/cifar10_minicoco_voc/gating/baseline/nGPU3_multi_adamw_lr1e-4_gamma0.1_GradFilter_SW00015_AMP_LS04/ckpts/checkpoint.pth
 
 
 loss_ratio: null
