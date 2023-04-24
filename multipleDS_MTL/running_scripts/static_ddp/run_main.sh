@@ -1,42 +1,17 @@
 #!/bin/bash
 
-PORT=$1
-METHOD=$2
-START_GPU=$3
-NUM_GPU=$4
-BACKBONE=$5
-
-# ./run_single.sh 6000 3 4 resnet50 minicoco_mtan
-
-# while :
-# do
-#     ./run_penta.sh 6000 3 4 resnet50 ucsmv
-#     sleep 30
-# done
+cnt=0
+while (( "${cnt}" < 2 )); do 
+    ./run_three.sh 6000 3 4 resnet50 static_ddp pcgrad Basic_KaiNorm_totMean_allReduceStHe
 
 
-# while :
-# do
-#     ./run_penta.sh 6000 3 4 resnet50 ucsmv
-#     sleep 30
-# done
-
-
-# while :
-# do
-#     ./run_quad.sh 29500 mtan 3 4 resnet50
-#     sleep 50
-
-# done
-
-
-
-# cd ../gating_scripts
-# cd ./run_main2.sh
-
-
-
-while :
-do
-    ./run_three.sh 6660 baseline 5 2 resnet50
+    
+    # ./run_three2.sh 29500 3 4 resnet50 static_ddp pcgrad Basic_KaiNorm_totMean_allReduce_UWneg1
+    # ./run_three3.sh 29500 3 4 resnet50 static_ddp pcgrad Basic_KaiNorm_totMean_allReduce_UWpos2
+    # ./run_three4.sh 29500 3 4 resnet50 static_ddp pcgrad Basic_KaiNorm_totMean_allReduce_DWA
+    # ./run_three.sh 29500 3 4 resnet50 static_ddp pcgrad pnGrad_PNMG_minDIR_p2
+    # ./run_three2.sh 29500 3 4 resnet50 static_ddp pcgrad pnGrad_PNtotalMG_minDIR_p2
+    (( cnt = "${cnt}" + 1 ))
 done
+
+

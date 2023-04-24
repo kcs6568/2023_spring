@@ -11,7 +11,7 @@ import torch
 import torch.utils.data
 from torch import distributed
 
-from engines import static_ddp_engines
+from engines import static_engines_ddp
 from datasets.load_datasets import load_datasets
 
 import lib.utils.metric_utils as metric_utils
@@ -25,19 +25,19 @@ from lib.apis.optimization import get_optimizer, get_scheduler
 from lib.model_api.build_model import build_model
 
 
-def adjust_learning_rate(optimizer, epoch, args):
+def adjust_learning_rate(optimizer, epoch, args, gamma_list=None):
     """Decay the learning rate based on schedule"""
-    sch_list = args.sch_list
-    
     for i, param_group in enumerate(optimizer.param_groups):
         lr = param_group['lr']
         
-        if sch_list[i] == 'multi':
+        if args.sch == 'multi':
             if epoch in args.lr_steps:
                 lr *= 0.1 if epoch in args.lr_steps else 1.
                 
-        elif sch_list[i] == 'exp':
-            lr = lr * 0.9
+        elif args.sch == 'exp':
+            if gamma_list is None: lr = lr * 0.9
+            else: lr = lr * gamma_list[epoch]
+            
             
         param_group['lr'] = lr
         
@@ -54,7 +54,8 @@ def main(args):
     init_distributed_mode(args)
     # setup_for_distributed(args.rank == 0)
     
-    metric_utils.set_random_seed(args.seed)
+    args.seed = metric_utils.set_random_seed(args.seed)
+    
     log_dir = os.path.join(args.output_dir, 'logs')
     metric_utils.mkdir(log_dir)
     logger = TextLogger(log_dir, print_time=False)
@@ -102,7 +103,7 @@ def main(args):
     logger.log_text("Creating model")
     logger.log_text(f"Freeze Shared Backbone Network: {args.freeze_backbone}")
     model = build_model(args)
-    
+    setattr(model, "task_bs", args.task_bs)
     
     metric_utils.get_params(model, logger, False)
     
@@ -126,8 +127,6 @@ def main(args):
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         model = torch.nn.parallel.DistributedDataParallel(model,
                                                           device_ids=[args.gpu])
-        # print(model)
-        # exit()
         model_without_ddp = model.module
         
     else:
@@ -176,13 +175,8 @@ def main(args):
                 checkpoint['lr_scheduler']['_last_lr'][0] = tmp_lr
                 optimizer.param_groups[0]['lr'] = tmp_lr
             
-            # elif args.lr_scheduler == 'step':
-            #     if checkpoint['lr_scheduler']['step_size'] != args.step_size:
-            #         checkpoint['lr_scheduler']['step_size'] = args.step_size
-
-            #     optimizer.param_groups[0]['lr'] = checkpoint['lr_scheduler']['_last_lr'][0]
-            
             lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+            
             args.start_epoch = checkpoint["epoch"] + 1
             
             logger.log_text(f"Checkpoint List: {checkpoint.keys()}")
@@ -205,7 +199,16 @@ def main(args):
             if 'total_time' in checkpoint:
                 total_time = checkpoint['total_time']
                 logger.log_text(f"Previous Total Training Time: {str(datetime.timedelta(seconds=int(total_time)))}")
-            
+                
+            if 'grad_method_information' in checkpoint:
+                model.module.grad_method.set_saved_information(checkpoint['grad_method_information'])
+                logger.log_text(f"saved gradient method variables:\n{checkpoint['grad_method_information'].keys()}")
+                # logger.log_text(f"Previous gradient managing count: {len(model.module.grad_method.surgery_count)}")
+                
+            if 'weighting_method_information' in checkpoint:
+                model.module.weighting_method.set_saved_information(checkpoint['weighting_method_information'])
+                logger.log_text(f"saved weighting method variables:\n{checkpoint['weighting_method_information'].keys()}")
+                
             if args.amp:
                 logger.log_text("Load Optimizer Scaler for AMP")
                 scaler.load_state_dict(checkpoint["scaler"])
@@ -213,10 +216,15 @@ def main(args):
         except Exception as e:
             logger.log_text(f"The resume file is not exist\n{e}")
     
+    elif 'export_weight' in args:
+        if args.export_weight is not None:
+            exp_weight = torch.load(args.export_weight, map_location="cpu")
+            model_without_ddp.load_state_dict(exp_weight['model'])
+            logger.log_text("Export weight was loaded.")
     
     if args.validate_only:
         logger.log_text(f"Start Only Validation")
-        results = static_ddp_engines.evaluate(
+        results = static_engines_ddp.evaluate(
             model, val_loaders, args.data_cats, logger, args.num_classes)
             
         line="<First Evaluation Results>\n"
@@ -233,7 +241,7 @@ def main(args):
 
     if args.validate:
         logger.log_text(f"First Validation Start")
-        results = static_ddp_engines.evaluate(
+        results = static_engines_ddp.evaluate(
             model, val_loaders, args.data_cats, logger, args.num_classes)
         
         line="<First Evaluation Results>\n"
@@ -247,8 +255,6 @@ def main(args):
         if args.resume_tmp:
             args.resume_tmp = False
 
-    
-    
     if args.start_epoch <= args.warmup_epoch:
         if args.warmup_epoch > 1:
             args.warmup_ratio = 1
@@ -262,6 +268,7 @@ def main(args):
     task_flops = {t: [] for t in args.task}
     
     loss_header = None
+    task_performance = {k: [] for k in train_loaders.keys()}
     task_loss = []
     task_acc = []
     
@@ -293,7 +300,7 @@ def main(args):
 
         if not args.resume_tmp:
             # warmup_fn = get_warmup_scheduler if epoch == 0 else None
-            once_train_results = static_ddp_engines.training(
+            once_train_results = static_engines_ddp.training(
                 model, 
                 optimizer, 
                 train_loaders, 
@@ -312,6 +319,8 @@ def main(args):
                     
             else:
                 adjust_learning_rate(optimizer, epoch, args)
+
+            # continue
             
             if loss_header is None:
                 header = once_train_results[1][-1]
@@ -360,7 +369,7 @@ def main(args):
         # evaluate after every epoch
         logger.log_text("Validation Start")
         time.sleep(2)
-        results = static_ddp_engines.evaluate(
+        results = static_engines_ddp.evaluate(
                 model, val_loaders, args.data_cats, logger, args.num_classes
             )
         logger.log_text("Validation Finish\n{}".format('---'*60))
@@ -376,6 +385,7 @@ def main(args):
         for data in args.task:
             v = results[data]
             tmp_acc.append(v)
+            task_performance[data].append(v)
             line += '\t{}: Current Perf. || Previous Best: {} || {}\n'.format(
                 data.upper(), v, best_results[data]
             )
@@ -400,6 +410,15 @@ def main(args):
         checkpoint['best_epoch'] = best_epoch
         checkpoint['total_time'] = total_time
         
+        if getattr(model.module, 'grad_method') is not None:
+            if hasattr(model.module.grad_method, "get_save_information"):
+                checkpoint['grad_method_information'] = model.module.grad_method.get_save_information
+        
+        if getattr(model.module, 'weighting_method') is not None:
+            if hasattr(model.module.weighting_method, "get_save_information"):
+                checkpoint['weighting_method_information'] = model.module.weighting_method.get_save_information
+            
+            
         if tb_logger is not None:
             logged_data = {dset: results[dset] for dset in args.task}
             tb_logger.update_scalars(
@@ -451,6 +470,10 @@ def main(args):
         acc_csv_path = os.path.join(csv_dir, f"allacc_result_gpu{args.gpu}.csv")
         with open(acc_csv_path, 'a') as f:
             np.savetxt(f, task_acc, delimiter=',', header=task_header)
+        
+        for task, perf in task_performance.items(): logger.log_text(f"{task.upper()} all epoch performance: {perf}")
+        if getattr(model.module, 'grad_method') is not None:
+            logger.log_text(f"All iteration gradient managing counting: {model.module.grad_method.get_surgery_count}")
             
         line = "FLOPs Result:\n"        
         for dset in args.task:

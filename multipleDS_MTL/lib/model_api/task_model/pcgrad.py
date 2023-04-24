@@ -113,67 +113,6 @@ class PCGradMTL(nn.Module):
                 target.grad = base.grad
                 
         
-        # all_norm = []
-        # for d in self.datasets:
-        #     norm = 0
-        #     for p in self.task_single_network[d].encoder.parameters():
-        #         norm += p.grad.norm()
-        #     all_norm.append(norm)
-            
-            
-        # print(all_norm)
-                
-        
-                
-        # exit()
-                
-            
-                
-        
-        
-        # base_state_dict = self.get_shared_encoder.state_dict()
-        
-        # base_norm = 0
-        # for p in self.get_shared_encoder.parameters():
-        #     base_norm += p.grad.norm()
-        
-        # print(base_state_dict.keys())
-        
-        # task_norm = [base_norm]
-        
-        # for d in self.datasets:
-        #     if d == self.base_dataset: continue
-        #     norm = 0
-        #     for p in self.task_single_network[d].encoder.parameters():
-        #         norm += p.grad.norm()
-        #     task_norm.append(norm)
-        
-        # for dset in self.datasets:
-        #     if dset == self.base_dataset: continue
-        #     self.task_single_network[dset].encoder.load_state_dict(base_state_dict)
-        
-        
-        # all_norm = []
-        # for d in self.datasets:
-        #     norm = 0
-        #     for p in self.task_single_network[d].encoder.parameters():
-        #         norm += p.grad.norm()
-        #     all_norm.append(norm)
-            
-            
-        # print(task_norm)
-        # print(all_norm)
-        # exit()
-        
-        
-        # for n, p in self.get_shared_encoder.named_parameters():
-        #     for dset in self.datasets:
-        #         if dset == self.base_dataset: continue
-        #         # setattr(self.task_single_network[dset].encoder, f"{n}", p.grad)
-        #         print(getattr(self.task_single_network[dset].encoder, n))
-            # exit()
-                
-                
     def compute_pcgrad(self):
         origin_grad = {k: self._grad2vec(k) for k in self.datasets}
         pcgrad = {k: origin_grad[k].clone().to(get_rank()) for k in self.datasets}

@@ -6,34 +6,13 @@ START_GPU=$3
 NUM_GPU=$4
 BACKBONE=$5
 
-# ./run_single.sh 6000 3 4 resnet50 minicoco_mtan
 
-# while :
-# do
-#     ./run_penta.sh 6000 3 4 resnet50 ucsmv
-#     sleep 30
-# done
+cnt=0
+while (( "${cnt}" < 2 )); do
+    ./run_three.sh 29500 3 4 resnet50 static pcgrad sepGrad_kaimNorm_Clip1_gradReduce
+    # ./run_three2.sh 29500 3 4 resnet50 static pcgrad sepGrad_kaimNorm_eachClip1_UWneg1
+    # ./run_three3.sh 29500 3 4 resnet50 static pcgrad sepGrad_kaimNorm_eachClip1_UWpos2
+    # ./run_three4.sh 29500 3 4 resnet50 static pcgrad sepGrad_kaimNorm_eachClip1_DWA
+    (( cnt = "${cnt}" + 1 ))
+done
 
-
-# while :
-# do
-#     ./run_penta.sh 6000 3 4 resnet50 ucsmv
-#     sleep 30
-# done
-
-
-# while :
-# do
-#     ./run_quad.sh 29500 mtan 3 4 resnet50
-#     sleep 50
-
-# done
-
-
-
-# cd ../gating_scripts
-# cd ./run_main2.sh
-
-
-
-./run_three.sh 6000 baseline 5 2 resnet50

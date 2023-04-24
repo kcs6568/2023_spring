@@ -231,7 +231,7 @@ def non_shared_gate_loss(gate_logits, tasks):
     return non_sharing_loss
 
 
-def disjointed_policy_loss(gate_logits, num_blocks, smoothing_alpha=None):
+def disjointed_policy_loss(gate_logits, num_blocks, sparsity_weight=1.0, smoothing_alpha=None, return_sum=True):
     loss = 0.
     if smoothing_alpha is not None:
         gt_ = torch.ones(num_blocks, 2).long().cuda()
@@ -252,10 +252,22 @@ def disjointed_policy_loss(gate_logits, num_blocks, smoothing_alpha=None):
     #     loss = {}
     #     for data, logit in gate_logits.items(): loss[data] = F.cross_entropy(logit, gt)
     
-    for logit in gate_logits.values():
-        loss += F.cross_entropy(logit, gt)
+    all_loss = []
+    
+    if isinstance(gate_logits, nn.ParameterDict):
+        for logit in gate_logits.values():
+            loss = F.cross_entropy(logit, gt) * sparsity_weight
+            all_loss.append(loss)
+            
+        if return_sum: return sum(all_loss)
+        else: return {f"{k}_sparsity_loss": all_loss[i] for i, k in enumerate(gate_logits.keys())}
         
-    return loss
+    else:
+        loss = F.cross_entropy(gate_logits, gt) * sparsity_weight
+        return loss
+        
+        
+    
 
 
 

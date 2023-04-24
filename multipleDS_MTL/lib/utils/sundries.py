@@ -74,10 +74,11 @@ def set_args(args):
         if not i+1 == n_task:
             args.dataset += "_"
     
-    if len(args.task_bs) == 3:
-        args.task = [task for task in args.task_cfg.keys() if args.task is not None]
-    elif len(args.task_bs) > 3:
-        args.task = [task for task in args.task_cfg.keys() if args.task_cfg[task] is not None]
+    # if len(args.task_bs) == 3:
+    #     args.task = [task for task in args.task_cfg.keys() if args.task is not None]
+    # elif len(args.task_bs) > 3:
+    #     args.task = [task for task in args.task_cfg.keys() if args.task_cfg[task] is not None]
+    args.task = [task for task in args.task_cfg.keys()]
     
     args.all_data_size = {dset: 0 for dset in args.task}
     
@@ -93,10 +94,11 @@ def set_args(args):
     elif args.num_datasets == 5:
         num_task = "quintuple"
     
-    if args.setup == 'single_task':
-        args.method = 'baseline'
-    
-    
+    if 'gating' in args.approach:
+        if args.retrain_phase:
+            if args.approach == 'gating_ddp':
+                args.approach = 'gating'
+                for k, v in args.task_balancing.items(): args.task_balancing[k] = None
     if args.output_dir: # /root/~/exp
         # args.output_dir = os.path.join(
         #     args.output_dir, args.model, num_task, args.dataset, args.method)
@@ -104,11 +106,11 @@ def set_args(args):
         args.output_dir = os.path.join(
             args.output_dir, args.model, num_task, args.dataset)
         
-        if 'is_retrain' in args and args.is_retrain:
-            args.load_trained = os.path.join(args.output_dir, "dynamic", args.approach, args.load_trained, 'ckpts', 'checkpoint.pth')
-        
+        if torch.cuda.device_count() == 1:
+            args.output_dir = os.path.join(args.output_dir, "single_GPU")
+            
         args.output_dir = os.path.join(
-            args.output_dir, args.method, args.approach)
+            args.output_dir, args.approach, args.method)
         
         if args.exp_case:
             args.output_dir = os.path.join(args.output_dir, args.exp_case)

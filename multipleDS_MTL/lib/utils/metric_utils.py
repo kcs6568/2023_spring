@@ -8,6 +8,7 @@ from collections import OrderedDict
 import torch
 from .dist_utils import *
 
+torch.set_printoptions(linewidth=1000)
 
 class ConfusionMatrix:
     def __init__(self, num_classes):
@@ -33,15 +34,15 @@ class ConfusionMatrix:
 
     def compute(self):
         h = self.mat.float()
-        if self.filter_cats:
-            mask = []
-            for i in range(self.num_classes):
-                if not i in self.filter_cats:
-                    mask.append(i)
-            # mask = torch.tensor(mask).cuda()
-            mask = torch.tensor(mask).to("cuda")
-            h = torch.index_select(h, 1, mask)
-            h = torch.index_select(h, 0, mask)
+        # if self.filter_cats:
+        #     mask = []
+        #     for i in range(self.num_classes):
+        #         if not i in self.filter_cats:
+        #             mask.append(i)
+        #     # mask = torch.tensor(mask).cuda()
+        #     mask = torch.tensor(mask).to("cuda")
+        #     h = torch.index_select(h, 1, mask)
+        #     h = torch.index_select(h, 0, mask)
             
         acc_global = torch.diag(h).sum() / h.sum()
         acc = torch.diag(h) / h.sum(1)
@@ -88,7 +89,7 @@ class SmoothedValue:
         
         if isinstance(value, int):
             self.total = int(self.total)
-
+            
     def synchronize_between_processes(self):
         """
         Warning: does not synchronize the deque!
@@ -114,7 +115,6 @@ class SmoothedValue:
 
     @property
     def global_avg(self):
-        # print(self.total, self.count)
         return self.total / self.count
 
     @property
@@ -193,7 +193,6 @@ class MetricLogger:
                 v = v.item()
             assert isinstance(v, (float, int))
             self.meters[k].update(v)
-            # print(k, v, self.meters[k].count)
 
     def __getattr__(self, attr):
         if attr in self.meters:
@@ -650,12 +649,12 @@ def set_random_seed(seed, deterministic=False, device='cuda'):
         torch.backends.cudnn.enabled = True
     
     rank, world_size = get_rank(), get_world_size()
-    if seed is None:
-        seed = np.random.randint(2**31)
-    else:
-        # seed = seed + rank
-        seed = seed
-        
+    # if seed is None:
+    #     seed = np.random.randint(2**31)
+    # else:
+    #     seed = seed + rank
+    #     # seed = seed
+    seed = seed + rank 
     if world_size == 1:
         return seed
         
@@ -663,6 +662,8 @@ def set_random_seed(seed, deterministic=False, device='cuda'):
     # dist.broadcast(random_num, src=0)
     seed = random_num.item()
     _set_seed(seed)
+    
+    return seed
     
     # return seed
 

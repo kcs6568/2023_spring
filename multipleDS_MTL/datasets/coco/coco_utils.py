@@ -91,8 +91,10 @@ class ConvertCocoPolysToMask:
         classes = [obj["category_id"] for obj in anno]
         classes = torch.tensor(classes, dtype=torch.int64)
 
-        segmentations = [obj["segmentation"] for obj in anno]
-        masks = convert_coco_poly_to_mask(segmentations, h, w)
+        masks = None
+        if 'segmentation' in anno:
+            segmentations = [obj["segmentation"] for obj in anno]
+            masks = convert_coco_poly_to_mask(segmentations, h, w)
 
         keypoints = None
         if anno and "keypoints" in anno[0]:
@@ -105,14 +107,16 @@ class ConvertCocoPolysToMask:
         keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
         boxes = boxes[keep]
         classes = classes[keep]
-        masks = masks[keep]
+        # masks = masks[keep]
         if keypoints is not None:
             keypoints = keypoints[keep]
 
         target = {}
         target["boxes"] = boxes
         target["labels"] = classes
-        target["masks"] = masks
+        
+        if masks is not None:
+            target["masks"] = masks
         target["image_id"] = image_id
         if keypoints is not None:
             target["keypoints"] = keypoints
@@ -122,6 +126,13 @@ class ConvertCocoPolysToMask:
         iscrowd = torch.tensor([obj["iscrowd"] for obj in anno])
         target["area"] = area
         target["iscrowd"] = iscrowd
+
+        # target["boxes"] = boxes
+        # target["labels"] = classes
+        # target["image_id"] = image_id
+        # iscrowd = torch.tensor([obj["iscrowd"] for obj in anno])
+        # target["iscrowd"] = iscrowd
+        
 
         return image, target
 
@@ -233,11 +244,19 @@ class CustomCocoDetection(torchvision.datasets.CocoDetection):
     def __init__(self, img_folder, ann_file, transform):
         super().__init__(img_folder, ann_file)
         self.transform = transform
+        self.gt_for_detection = ['bbox', 'category_id', 'image_id', 'iscrowd']
+        self.filtered_gt = ['segmentation']
     
     def __getitem__(self, idx):
         img, target = super().__getitem__(idx)
         image_id = self.ids[idx]
         target = dict(image_id=image_id, annotations=target)
+        
+        # target['annotations'] = [{k: anno for k, anno in gt.items() if k in self.gt_for_detection} for gt in target['annotations']]
+        # target['annotations'] = [{k: anno for k, anno in gt.items() if k not in self.filtered_gt} for gt in target['annotations']]
+        
+        # exit()
+        
         
         if self.transform is not None:
             img, target = self.transform(img, target)

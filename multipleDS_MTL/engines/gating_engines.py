@@ -30,9 +30,9 @@ def clipping_coeff(param_list):
 
 
 class LossCalculator:
-    def __init__(self, type, data_cats, loss_ratio, task_weights=None, method='multi_task') -> None:
+    def __init__(self, type, data_cats, loss_ratio, task_weights=None, weighting_method=None) -> None:
         self.type = type
-        self.method = method
+        self.weighting_method = weighting_method
         self.data_cats = data_cats
         
         if self.type == 'balancing':
@@ -52,30 +52,33 @@ class LossCalculator:
         for data in self.data_cats:
             data_loss = sum(loss for k, loss in output_losses.items() if data in k)
             data_loss *= self.loss_ratio[data]
-            # balanced_losses.update({f"bal({str(self.loss_ratio[data])})_{self.data_cats[data]}_{data}": data_loss})
-            balanced_losses.update({data: data_loss})
+            balanced_losses.update({f"bal({str(self.loss_ratio[data])})_{self.data_cats[data]}_{data}": data_loss})
             losses += data_loss
         return losses, balanced_losses
     
     
-    def general_loss(self, output_losses, wm=None):
+    def general_loss(self, output_losses, extraction_key=None):
         assert isinstance(output_losses, dict)
         
-        if wm is None:
-            losses = sum(loss for loss in output_losses.values())
-            return losses, None
+        # task_losses = {data: sum(loss for k, loss in output_losses.items() if data in k) for data in self.data_cats}
+        # logging_dict = self.weighting_method(task_losses)
+        # losses = sum(loss for loss in logging_dict.values())
         
+        logging_dict = None
+        if self.weighting_method is None: losses = sum(loss for loss in output_losses.values())
         else:
-            task_losses = {data: sum(l for n, l in output_losses.items() if data in n) for data in self.data_cats}
-            wm_losses = wm(task_losses)
+            task_losses = {data: sum(loss for k, loss in output_losses.items() if data in k) for data in self.data_cats}
+            logging_dict = self.weighting_method(task_losses)
+            losses = sum(loss for loss in logging_dict.values())
+            # if extraction_key is None: task_losses = {data: sum(loss for k, loss in output_losses.items() if data in k) for data in self.data_cats}
+            # else:
+            #     task_losses = {data: v for data in self.data_cats for k, v in output_losses.items() if data in k if extraction_key in k}
+            #     other_losses = sum(loss for k, loss in output_losses.items() if not extraction_key in k)
+                
+            # logging_dict = self.weighting_method(task_losses)
+            # losses = sum(loss for loss in logging_dict.values()) + other_losses
             
-            losses = 0.
-            log_losses = {}
-            for data, loss in wm_losses.items():
-                log_losses[f"{wm.method_name}_{data}"] = loss
-                losses += loss
-            
-            return losses, log_losses
+        return losses, logging_dict
 
 
 def training(model, optimizer, data_loaders, 
@@ -83,6 +86,7 @@ def training(model, optimizer, data_loaders,
           tb_logger, scaler, args,
           warmup_sch=None):
     model.train()
+    module = model.module
     
     metric_logger = metric_utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter("main_lr", metric_utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
@@ -111,14 +115,19 @@ def training(model, optimizer, data_loaders,
     else:
         logger.log_text("No Warmup Training")
     
-    # loss_calculator = None
+    if not module.retrain_phase:
+        logger.log_text(f"Current Sparsity Weight: {args.baseline_args['gate_args']['sparsity_weight']}")
+    
+    weighting_method = None if module.weighting_method is None else module.weighting_method
+    grad_method = None if module.grad_method is None else module.grad_method
+    
     if args.lossbal:
         loss_calculator = LossCalculator(
-            'balancing', args.task_per_dset, args.loss_ratio, method=args.method)
+            'balancing', args.task_per_dset, args.loss_ratio, weighting_method=weighting_method)
     elif args.general:
         loss_calculator = LossCalculator(
-            'general', args.task_per_dset, args.loss_ratio, method=args.method)
-    
+            'general', args.task_per_dset, args.loss_ratio, weighting_method=weighting_method)
+        
     start_time = time.time()
     end = time.time()
     
@@ -126,12 +135,13 @@ def training(model, optimizer, data_loaders,
     loss_for_save = None
     
     all_iter_losses = []
-    clip_value = torch.tensor(args.grad_clip_value, dtype=torch.float)
-    min_grad = torch.neg(clip_value) if clip_value > 0 else clip_value
-    max_grad = clip_value if clip_value > 0 else torch.neg(clip_value)
+    if args.grad_clip_value is not None:
+        clip_value = torch.tensor(args.grad_clip_value, dtype=torch.float)
+        min_grad = torch.neg(clip_value) if clip_value > 0 else clip_value
+        max_grad = clip_value if clip_value > 0 else torch.neg(clip_value)
     
     # wm = None
-    wm = model.module.wm
+    
     for i, b_data in enumerate(biggest_dl):
         input_dicts.clear()
         input_dicts[biggest_datasets] = b_data
@@ -165,13 +175,13 @@ def training(model, optimizer, data_loaders,
             input_dicts.update({'load_count': load_cnt})
         
         input_set = metric_utils.preprocess_data(input_dicts, args.task_per_dset)
-        
         with torch.cuda.amp.autocast(enabled=scaler is not None):
             other_args.update({'cur_iter': i})
             loss_dict = model(input_set, other_args)
         
-        losses, log_losses = loss_calculator.loss_calculator(loss_dict, wm)
-        if log_losses is not None: loss_dict.update(log_losses)
+        losses, logging_dict = loss_calculator.loss_calculator(loss_dict, extraction_key='sparsity')
+        
+        if logging_dict is not None: loss_dict.update(logging_dict)
         
         loss_dict_reduced = metric_utils.reduce_dict(loss_dict)
         losses_reduced = sum(loss for loss in loss_dict_reduced.values())
@@ -200,34 +210,15 @@ def training(model, optimizer, data_loaders,
                 
             scaler.step(optimizer)
             scaler.update()
-            
         
         else:
             losses.backward(retain_graph=False)
-            
-            if args.filtering_method: model.module.compute_sim()
-            
-            
-            
-            # print("iteration", i)
-            # for dset in datasets: print(f"{dset}:\n{torch.transpose(model.module.task_gating_params[dset].grad.clone().detach(), 0, 1)}\n")
-            
             if args.grad_clip_value is not None:
-                # for p in model.parameters(): torch.clamp_(p.grad, min_grad, max_grad)
                 torch.nn.utils.clip_grad_norm_(
                     model.parameters(),
                     args.grad_clip_value)
-            
-            
-            # for dset in datasets: print(f"{dset}:\n{torch.transpose(model.module.task_gating_params[dset].grad.clone().detach(), 0, 1)}\n")
-            # for dset in datasets: print(f"{dset}:\n{torch.transpose(model.module.task_gating_params[dset].clone().detach(), 0, 1)}\n")
-            # print("***"*60)
-            
             optimizer.step()
             
-            
-            
-               
         # for n, p in model.named_parameters():
         #     if p.grad is None:
         #         print(f"{n} has no grad")
@@ -238,6 +229,8 @@ def training(model, optimizer, data_loaders,
         
         dist.all_reduce(losses)
         metric_logger.update(main_lr=optimizer.param_groups[0]["lr"])
+        if len(optimizer.param_groups) > 1:
+            metric_logger.update(gate_lr=optimizer.param_groups[1]["lr"])
         metric_logger.update(loss=losses, **loss_dict_reduced)
         iter_time.update(time.time() - end) 
         
@@ -256,13 +249,13 @@ def training(model, optimizer, data_loaders,
                 for dset in datasets: logger.log_text(f"{dset}:\n{torch.transpose(model.module.task_gating_params[dset].data.clone().detach(), 0, 1)}")
                 logger.log_text(f"Temperature: {model.module.decay_function.temperature}\n")
                 
-            if wm is not None:
-                logger.log_text(f"{wm.method_name}_Params: {str(wm)}")
+            if weighting_method is not None:
+                logger.log_text(f"{weighting_method.name}_Params: {str(weighting_method)}")
             
         if tb_logger:
             tb_logger.update_scalars(loss_dict_reduced, i)   
             # if not model.module.retrain_phase:
-            if wm is not None: tb_logger.update_scalars(wm.logsigma, i)
+            # if weighting_method is not None: tb_logger.update_scalars(wm.logsigma, i)
 
             '''
             If the break block is in this block, the gpu memory will stuck (bottleneck)
@@ -281,7 +274,10 @@ def training(model, optimizer, data_loaders,
         
         # logger.log_text(f"{i} iter finished\n")
         # torch.cuda.synchronize()
-        
+    
+    if i+1 == module.decay_function.max_iter:
+        module.decay_function.set_temperature(i+1)
+    
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.log_text(f"{header} Total time: {total_time_str} ({total_time / biggest_size:.4f} s / it)")

@@ -175,7 +175,7 @@ class Bottleneck(nn.Module):
         self.conv3 = conv1x1(width, planes * self.expansion)
         self.bn3 = norm_layer(planes * self.expansion)
         self.activation = activation_function
-            
+        
         self.downsample = downsample
         self.stride = stride
         self.out_channels = planes * self.expansion

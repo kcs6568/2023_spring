@@ -48,26 +48,27 @@ def return_sampler(train_dset, test_dset, world_size, rank, seed):
     return train_sampler, test_sampler
 
 
-def get_train_dataloader(train_dset, train_sampler, args, bs, collate_fn=None):
+def get_train_dataloader(train_dset, train_sampler, args, collate_fn=None):
     '''
     if segmentation dataset loader, the args.no_pin_memory is False, other datasets is True 
     '''
     
     
     train_loader = torch.utils.data.DataLoader(
-        train_dset, batch_size=bs, shuffle=(train_sampler is None),
+        train_dset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=args.pin_memory, sampler=train_sampler, collate_fn=collate_fn, drop_last=True)
     
     return train_loader
 
 
-def get_test_dataloader(test_dset, test_sampler, args, bs, collate_fn=None):
+def get_test_dataloader(test_dset, test_sampler, args, collate_fn=None):
     '''
     if segmentation dataset loader, the args.no_pin_memory is False, other datasets is True
     '''
     
+        
     test_loader = torch.utils.data.DataLoader(
-        test_dset, batch_size=1, shuffle=False,
+        test_dset, batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=args.pin_memory, sampler=test_sampler, collate_fn=collate_fn)
     
     return test_loader

@@ -750,25 +750,6 @@ class RoIHeads(nn.Module):
         box_features = self.box_head(box_features)
         class_logits, box_regression = self.box_predictor(box_features)
         
-        # print(class_logits)
-        # prob = F.softmax(class_logits, dim=1)
-        
-        # text = ""
-        # for i, p in enumerate(prob):
-        #     c = torch.argmax(p)
-        #     print(p, float(p[0]), int(c), float(p[int(c)]))
-        #     if i % 100 == 0:
-        #         exit()
-        #     c = torch.argmax(p)
-        #     text += f"{int(c)} "
-        #     if i % 45 == 0:
-        #         text += "\n"
-        # print(text)
-        
-        # split_ch = class_logits.size(0) // len(proposals)
-        # logit_list = class_logits.split(split_ch, 0)
-        # logit_means = torch.stack([torch.mean(logit, dim=0) for logit in logit_list], dim=0)
-        
         result: List[Dict[str, torch.Tensor]] = []
         
         losses = {}

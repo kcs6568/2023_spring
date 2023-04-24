@@ -1,11 +1,8 @@
 #!/bin/bash
 
-PORT=$1
-METHOD=$2
-START_GPU=$3
-NUM_GPU=$4
-BACKBONE=$5
-
-./run_three2.sh 6006 baseline 3 4 resnet50
-sleep 10
+cnt=0
+while (( "${cnt}" < 2 )); do
+    ./run_three2.sh 6000 3 2 resnet50 static pcgrad sepGrad_interval1
+    (( cnt = "${cnt}" + 1 ))
+done
 

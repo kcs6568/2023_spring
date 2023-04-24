@@ -50,9 +50,10 @@ CFG_PATH=$TRAIN_ROOT/cfgs/three_task/gating/cifar10_minicoco_voc/$YAML_CFG
 
 SCH="multi"
 OPT="adamw"
-LR="1e-4"
-GAMMA="0.1"
-ADD_DISC="[Ret]GradFilter_SW00015_AMP_LS04"
+LR="4e-5"
+GAMMA="0.5"
+# ADD_DISC="[from_original_code]sperate_mergeBlockSkipforEval"
+ADD_DISC="[Ret]onlyGateTraining_clipNorm"
 
 for sch in $SCH
 do
@@ -72,8 +73,7 @@ do
                     exp_case="$exp_case"_$ADD_DISC
                 fi
 
-                # CUDA_VISIBLE_DEVICES=$DEVICES torchrun --nproc_per_node=$4 --master_port=$1 \
-                CUDA_VISIBLE_DEVICES=4,5,7 torchrun --nproc_per_node=$4 --master_port=$1 \
+                CUDA_VISIBLE_DEVICES=$DEVICES torchrun --nproc_per_node=$4 --master_port=$1 \
                     $TRAIN_SCRIPT --general \
                     --cfg $CFG_PATH \
                     --warmup-ratio -1 --workers 4 --grad-clip-value 1 \

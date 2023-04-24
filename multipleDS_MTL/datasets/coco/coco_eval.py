@@ -6,6 +6,7 @@ import numpy as np
 import pycocotools.mask as mask_util
 import torch
 import lib.utils.metric_utils as metric_utils
+import lib.utils.dist_utils as dist
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 
@@ -33,23 +34,26 @@ class CocoEvaluator:
     def update(self, predictions):
         img_ids = list(np.unique(list(predictions.keys())))
         self.img_ids.extend(img_ids)
-
         for iou_type in self.iou_types:
             results = self.prepare(predictions, iou_type)
             with redirect_stdout(io.StringIO()):
                 coco_dt = COCO.loadRes(self.coco_gt, results) if results else COCO()
             coco_eval = self.coco_eval[iou_type]
-
             coco_eval.cocoDt = coco_dt
             coco_eval.params.imgIds = list(img_ids)
             img_ids, eval_imgs = evaluate(coco_eval)
-
             self.eval_imgs[iou_type].append(eval_imgs)
-
+        
+            
     def synchronize_between_processes(self):
         for iou_type in self.iou_types:
             self.eval_imgs[iou_type] = np.concatenate(self.eval_imgs[iou_type], 2)
-            create_common_coco_eval(self.coco_eval[iou_type], self.img_ids, self.eval_imgs[iou_type])
+            
+            if dist.is_dist_avail_and_initialized():
+                create_common_coco_eval(self.coco_eval[iou_type], self.img_ids, self.eval_imgs[iou_type])
+            else:
+                DP_create_common_coco_eval(self.coco_eval[iou_type], self.img_ids, self.eval_imgs[iou_type])
+            
 
     def accumulate(self):
         for coco_eval in self.coco_eval.values():
@@ -101,12 +105,11 @@ class CocoEvaluator:
         for original_id, prediction in predictions.items():
             if len(prediction) == 0:
                 continue
-
             boxes = prediction["boxes"]
             boxes = convert_to_xywh(boxes).tolist()
             scores = prediction["scores"].tolist()
             labels = prediction["labels"].tolist()
-
+            
             coco_results.extend(
                 [
                     {
@@ -118,6 +121,7 @@ class CocoEvaluator:
                     for k, box in enumerate(boxes)
                 ]
             )
+            
         return coco_results
 
     def prepare_for_coco_segmentation(self, predictions):
@@ -186,9 +190,44 @@ def convert_to_xywh(boxes):
     return torch.stack((xmin, ymin, xmax - xmin, ymax - ymin), dim=1)
 
 
+
+def merge_DP(img_ids, eval_imgs):
+    eval_imgs = [eval_imgs]
+    merged_img_ids = np.array(img_ids)
+    merged_eval_imgs = np.concatenate(eval_imgs, 2)
+
+    # print(len(merged_img_ids), len(merged_eval_imgs))
+    
+    # keep only unique (and in sorted order) images
+    merged_img_ids, idx = np.unique(merged_img_ids, return_index=True)
+    merged_eval_imgs = merged_eval_imgs[..., idx]
+
+    return merged_img_ids, merged_eval_imgs
+
+
+def DP_create_common_coco_eval(coco_eval, img_ids, eval_imgs):
+    # print(len(img_ids), len(eval_imgs))
+    img_ids, eval_imgs = merge_DP(img_ids, eval_imgs)
+    # print("***"*60)
+    # print(len(img_ids), len(eval_imgs))
+    img_ids = list(img_ids)
+    eval_imgs = list(eval_imgs.flatten())
+    # print(len(img_ids), len(eval_imgs))
+
+    coco_eval.evalImgs = eval_imgs
+    coco_eval.params.imgIds = img_ids
+    coco_eval._paramsEval = copy.deepcopy(coco_eval.params)
+
+    # exit()
+
+
+
+
 def merge(img_ids, eval_imgs):
+    # print(len(img_ids), len(eval_imgs))
     all_img_ids = metric_utils.all_gather(img_ids)
     all_eval_imgs = metric_utils.all_gather(eval_imgs)
+    # print(len(all_img_ids), len(all_eval_imgs))
 
     merged_img_ids = []
     for p in all_img_ids:
@@ -197,6 +236,8 @@ def merge(img_ids, eval_imgs):
     merged_eval_imgs = []
     for p in all_eval_imgs:
         merged_eval_imgs.append(p)
+
+    # print(len(merged_img_ids), len(merged_eval_imgs[0]), len(merged_eval_imgs[1]))
 
     merged_img_ids = np.array(merged_img_ids)
     merged_eval_imgs = np.concatenate(merged_eval_imgs, 2)
@@ -207,15 +248,18 @@ def merge(img_ids, eval_imgs):
 
     return merged_img_ids, merged_eval_imgs
 
-
 def create_common_coco_eval(coco_eval, img_ids, eval_imgs):
     img_ids, eval_imgs = merge(img_ids, eval_imgs)
+    # print("***"*60)
+    # print(len(img_ids), len(eval_imgs))
     img_ids = list(img_ids)
     eval_imgs = list(eval_imgs.flatten())
+    # print(len(img_ids), len(eval_imgs))
 
     coco_eval.evalImgs = eval_imgs
     coco_eval.params.imgIds = img_ids
     coco_eval._paramsEval = copy.deepcopy(coco_eval.params)
+    # exit()
 
 
 def evaluate(imgs):

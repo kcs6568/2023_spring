@@ -251,6 +251,7 @@ class FasterRCNN(nn.Module):
                     else:
                         torch._assert(False, f"Expected target boxes to be of type Tensor, got {type(boxes)}.")
 
+
         trs_images, trs_targets = trs_fn(origins, origin_targets)
         
         if trs_targets is not None:
@@ -292,72 +293,6 @@ class FasterRCNN(nn.Module):
                 
         else:
             return self.eager_outputs(losses, detections)
-    
-
-
-
-
-class MLPConvHead(nn.Module):
-    """
-    Standard heads for FPN-based models
-
-    Args:
-        in_channels (int): number of input channels
-        representation_size (int): size of the intermediate representation
-    """
-
-    def __init__(self, in_channels, representation_size):
-        super(MLPConvHead, self).__init__()
-        self.cls_mlp_head = nn.Sequential(
-            nn.Linear(in_channels, representation_size),
-            nn.Linear(representation_size, representation_size)
-        )
-        
-
-    def forward(self, x):
-        x = x.flatten(start_dim=1)
-        
-        cls_features = self.cls_mlp_head(x)
-        
-
-        return x
-    
-    
-class MLPConvFastRCNNPredictor(nn.Module):
-    """
-    Standard classification + bounding box regression layers
-    for Fast R-CNN.
-
-    Args:
-        in_channels (int): number of input channels
-        num_classes (int): number of output classes (including background)
-    """
-
-    def __init__(self, in_channels, num_classes, fc_to_conv=False):
-        super(MLPConvFastRCNNPredictor, self).__init__()
-        self.cls_score = nn.Linear(in_channels, num_classes)
-        self.bbox_pred = nn.Conv2d(in_channels, num_classes * 4, kernel_size=1, stride=1)
-        # if fc_to_conv:
-        #     self.bbox_pred = nn.Conv2d(in_channels, num_classes * 4, kernel_size=1, stride=1)
-        # else:
-        #     self.bbox_pred = nn.Linear(in_channels, num_classes * 4)       
-
-    def forward(self, x):
-        # x: [1024, 1024]
-        if x.dim() == 4:
-            assert list(x.shape[2:]) == [1, 1]
-        # x = x.flatten(start_dim=1)
-        # scores = self.cls_score(x)
-        # bbox_deltas = self.bbox_pred(x)
-        
-        # x = x.flatten(start_dim=1)
-        scores = self.cls_score(x.flatten(start_dim=1))
-        # x = x.unsqueeze
-        bbox_deltas = self.bbox_pred(x)
-        bbox_deltas = torch.flatten(bbox_deltas, 1)
-        
-        return scores, bbox_deltas   
-    
     
     
 class TwoMLPHead(nn.Module):

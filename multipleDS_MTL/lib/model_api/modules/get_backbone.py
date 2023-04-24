@@ -89,6 +89,8 @@ class BackboneWithFPN(nn.Module):
                 extra_blocks=extra_blocks,
             )
             self.fpn_out_channels = out_channels
+        else:
+            self.fpn = nn.Identity()
 
         self.use_fpn = use_fpn
         
@@ -108,7 +110,6 @@ def resnet_fpn_backbone(
 ):  
     backbone = get_resnet(backbone_name, **backbone_args)
     assert backbone is not None
-    
     # select layers that wont be frozen
     assert 0 <= backbone_args['trainable_layers'] <= 4
     layers_to_train = ['layer4', 'layer3', 'layer2', 'layer1'][:backbone_args['trainable_layers']]
@@ -184,7 +185,6 @@ def build_backbone(arch, detector=None,
     freeze_backbone = model_args.pop('freeze_backbone')
     train_allbackbone = model_args.pop('train_allbackbone')
     freeze_bn = model_args.pop('freeze_bn')
-    
     # if freeze_backbone:
     #     if not train_allbackbone:
     #         train_allbackbone = False

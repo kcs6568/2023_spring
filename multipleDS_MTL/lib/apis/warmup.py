@@ -110,7 +110,6 @@ class SimpleDecay(TempDecayABS):
         super(SimpleDecay, self).__init__(temperature, max_iter)
         self.decay_gamma = decay_gamma
         
-        
     def set_temperature(self, cur_iter):
         if cur_iter % self.max_iter == 0 :
             self.temperature *= self.decay_gamma

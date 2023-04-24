@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import math
 import shutil
@@ -46,13 +47,7 @@ def main(args):
     # os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
     metric_utils.mkdir(args.output_dir) # master save dir
     metric_utils.mkdir(os.path.join(args.output_dir, 'ckpts')) # checkpoint save dir
-    
-    # distributed.init_process_group(
-    #     ackend=args.dist_backend, init_method=args.dist_url, 
-    #     world_size=args.world_size, rank=args.rank, timeout=time.timedelta(seconds=120))
     init_distributed_mode(args)
-    # setup_for_distributed(args.rank == 0)
-    
     metric_utils.set_random_seed(args.seed)
     log_dir = os.path.join(args.output_dir, 'logs')
     metric_utils.mkdir(log_dir)
@@ -124,13 +119,17 @@ def main(args):
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         model = torch.nn.parallel.DistributedDataParallel(model,
                                                           device_ids=[args.gpu])
-        # print(model)
-        # exit()
         model_without_ddp = model.module
         
     else:
         model.cuda()
         
+    if 'export_weight' in args:
+        if args.export_weight:
+            ckpt = torch.load(args.export_weight, map_location='cpu')
+            model.module.load_state_dict(ckpt['model'], strict=True)
+            print("Loaded export weight")
+    
     logger.log_text(f"Model Configuration:\n{model}")
     metric_utils.get_params(model, logger, False)
     
@@ -152,7 +151,7 @@ def main(args):
             checkpoint = torch.load(ckpt, map_location="cpu")
             # checkpoint['model'] = {k: v for k, v in checkpoint['model'].items() if 'policys' not in k}
             
-            model_without_ddp.load_state_dict(checkpoint["model"], strict=False)
+            model_without_ddp.load_state_dict(checkpoint["model"], strict=True)
             optimizer.load_state_dict(checkpoint["optimizer"])
             
             if 'gamma' in checkpoint['lr_scheduler']:
@@ -226,7 +225,6 @@ def main(args):
             last_results[data] = results[data]
         logger.log_text(line)
         
-        import sys
         sys.exit(1)
     
 
@@ -311,6 +309,8 @@ def main(args):
                     
             else:
                 adjust_learning_rate(optimizer, epoch, args)
+                
+            # continue
             
             if loss_header is None:
                 header = once_train_results[1][-1]
@@ -367,7 +367,6 @@ def main(args):
                 task_flops[dset].append(mac)
         
         task_save = {dset: False for dset in args.task}
-        
         tmp_acc = []
         line = '<Compare with Best>\n'
         for data in args.task:
@@ -431,13 +430,18 @@ def main(args):
         # metric_utils.save_on_master(checkpoint, save_file)
         # logger.log_text("Complete saving checkpoint!\n")
         
-        
         logger.log_text(f"Current Epoch: {epoch+1} / Last Epoch: {args.epochs}\n")       
         logger.log_text("Complete {} epoch\n{}\n\n".format(epoch+1, "###"*30))
         torch.distributed.barrier()
         
         if args.resume_tmp:
             args.resume_tmp = False
+        
+        if args.find_epoch is not None:
+            if epoch+1 == args.find_epoch:
+                logger.log_text("Epoch for finding hyp was reached. Process will be terminated.")
+                sys.exit(1)
+        
         
         torch.cuda.synchronize()
         time.sleep(2)

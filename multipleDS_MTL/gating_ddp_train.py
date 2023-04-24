@@ -11,7 +11,6 @@ import torch
 import torch.utils.data
 from torch import distributed
 
-from engines import gating_engines
 from datasets.load_datasets import load_datasets
 
 import lib.utils.metric_utils as metric_utils
@@ -21,7 +20,7 @@ from lib.utils.sundries import set_args
 from lib.utils.logger import TextLogger, TensorBoardLogger
 
 from lib.apis.warmup import get_warmup_scheduler
-from lib.apis.optimization import get_optimizer, get_scheduler
+from lib.apis.optimization import get_optimizer, get_optimizer_for_gating, get_scheduler
 from lib.model_api.build_model import build_model
 
 
@@ -46,12 +45,9 @@ def main(args):
     # os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
     metric_utils.mkdir(args.output_dir) # master save dir
     metric_utils.mkdir(os.path.join(args.output_dir, 'ckpts')) # checkpoint save dir
+    torch.set_printoptions(linewidth=300)
     
-    # distributed.init_process_group(
-    #     ackend=args.dist_backend, init_method=args.dist_url, 
-    #     world_size=args.world_size, rank=args.rank, timeout=time.timedelta(seconds=120))
     init_distributed_mode(args)
-    # setup_for_distributed(args.rank == 0)
     
     metric_utils.set_random_seed(args.seed)
     log_dir = os.path.join(args.output_dir, 'logs')
@@ -100,12 +96,140 @@ def main(args):
     
     logger.log_text("Creating model")
     logger.log_text(f"Freeze Shared Backbone Network: {args.freeze_backbone}")
+    
     model = build_model(args)
     
-    metric_utils.get_params(model, logger, False)
+    if args.retrain_phase:
+        from engines import gating_engines as running_engine
+        setattr(model, 'retrain_phase', True)
+        retrain_args = args.retrain_args
+        args.epochs = retrain_args['epoch']
+        
+        if args.lr_scheduler == 'multi':
+            assert max(retrain_args['scheduler_step']) < retrain_args['epoch']
+            args.lr_steps = retrain_args['scheduler_step']
+        elif args.lr_scheduler == 'step':
+            args.step_size = retrain_args['step_size']
+            
+        if 'gate_opt' in args or 'gate_opt' is not None:
+            args.gate_opt = None
+        
+        if retrain_args['gated_weight'] == 'mine':
+            gating_path = os.path.join(args.output_dir, 'ckpts', f"checkpoint_tmp.pth")
+        else: gating_path = retrain_args['gated_weight']
+        gated_weight = torch.load(gating_path, map_location=torch.device('cpu'))['model']
+        
+        if retrain_args['from_ddp']:
+            base_dataset = list(train_loaders.keys())[0]
+            
+            encoder_weight = {}
+            fpn_weight = {}
+            gating_weight = {}
+            task_stem = {d: {} for d in list(train_loaders.keys())}
+            task_head = {d: {} for d in list(train_loaders.keys())}
+            
+            for n, p in gated_weight.items():
+                if 'encoder'in n:
+                    if base_dataset in n:
+                        start = n.index(base_dataset) 
+                        end = len(base_dataset[1:])+2 + len("encoder") + 1
+                        new_key = n[start+end:]
+                        encoder_weight[new_key] = p
+                    else: continue
+                
+                else:
+                    if 'stem' in n:
+                        start = n.index("stem")
+                        end = len("stem"[1:])+2
+                        for data in list(train_loaders.keys()):
+                            if data in n: 
+                                new_key = f"{data}." + n[start+end:]
+                                task_stem[data][new_key] = p
+                                break
+                                    
+                    elif 'head' in n:
+                        start = n.index("head")
+                        end = len("head"[1:])+2
+                        new_key = n[start+end:]
+                        
+                        if 'fpn' in new_key:
+                            new_key = new_key.replace("fpn.", "")
+                            fpn_weight[new_key] = p
+                        
+                        else:
+                            for data in list(train_loaders.keys()):
+                                if 'detector' in new_key and data in n:
+                                    new_key = new_key.replace("detector", data)
+                                    task_head[data][new_key] = p
+                                    break
+                                
+                                else:
+                                    if data in n:
+                                        new_key = f"{data}." + new_key
+                                        task_head[data][new_key] = p
+                                        break
+                    
+                    elif 'gating' in n:
+                        for data in list(train_loaders.keys()):
+                            if data in n: gating_weight[data] = p
+                            
+                            
+                        
+            model.encoder.load_state_dict(encoder_weight, strict=True)
+            model.fpn.load_state_dict(fpn_weight, strict=True)
+            
+            all_stem = {}
+            all_head = {}
+            for data in list(train_loaders.keys()):
+                if len(all_stem) == 0: all_stem = task_stem[data]
+                else: all_stem.update({k: v for k, v in task_stem[data].items()})
+                
+                if len(all_head) == 0: all_head = task_head[data]
+                else: all_head.update({k: v for k, v in task_head[data].items()})
+            
+            model.stem_dict.load_state_dict(all_stem, strict=True)
+            model.head_dict.load_state_dict(all_head, strict=True)
+            model.task_gating_params.load_state_dict(gating_weight, strict=True)
+            
+        else:
+            ignore_keys = ['weighting_method', 'grad_method']
+            if ignore_keys is not None:
+                with torch.no_grad():
+                    for n, p in model.named_parameters():
+                        checklist = torch.zeros(len(ignore_keys)).bool()
+                        for i in range(len(ignore_keys)): checklist[i] = ignore_keys[i] in n
+                        if not torch.all(checklist): p.copy_(gated_weight[n])
+                        
+            else:
+                model.load_state_dict(gated_weight, strict=False)
+        model.fix_gate()
+        logger.log_text(str(model))
+        
+        gated_block_p, ds_param, total_param = model.compute_subnetwork_size()
+        
+        sum_ds = float(sum(ds_param))
+        sum_total = float(sum(total_param)) + sum_ds
+        for data, params in gated_block_p.items():
+            sump = sum(params).detach().numpy()
+            lines = f"{data} gated parameters:"
+            lines += f" {round(sump*(1e-6) + sum_ds*(1e-6), 3)}M/{round(sum_total*(1e-6), 3)}M"
+            logger.log_text(lines)
     
-    optimizer = get_optimizer(args, model)
+    else: 
+        setattr(model, 'retrain_phase', False)
+        from engines import gating_engines_ddp as running_engine
     
+    if args.only_gate_train:
+        learnable_params = ['gating', 'weighting']
+        for n, p in model.named_parameters():
+            checklist = torch.zeros(len(learnable_params)).bool()
+            for i in range(len(learnable_params)): checklist[i] = not learnable_params[i] in n
+            if torch.all(checklist): p.requires_grad = False
+            
+        setattr(model, 'only_gate_train', args.only_gate_train)
+    
+    if args.gate_opt is not None: optimizer = get_optimizer_for_gating(args, model)
+    else: optimizer = get_optimizer(args, model)
     logger.log_text(f"Optimizer:\n{optimizer}")
     logger.log_text(f"Apply AMP: {args.amp}")
     scaler = torch.cuda.amp.GradScaler() if args.amp else None
@@ -124,12 +248,7 @@ def main(args):
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         model = torch.nn.parallel.DistributedDataParallel(model,
                                                           device_ids=[args.gpu])
-        # print(model)
-        # exit()
-        model_without_ddp = model.module
-        
-    else:
-        model.cuda()
+        model_without_module = model.module
         
     logger.log_text(f"Model Configuration:\n{model}")
     metric_utils.get_params(model, logger, False)
@@ -150,9 +269,11 @@ def main(args):
 
         try:
             checkpoint = torch.load(ckpt, map_location="cpu")
-            # checkpoint['model'] = {k: v for k, v in checkpoint['model'].items() if 'policys' not in k}
             
-            model_without_ddp.load_state_dict(checkpoint["model"], strict=False)
+            # if args.retrain_phase:
+            #     checkpoint['model'] = {k: v for k, v in checkpoint['model'].items() if 'task_gating_params' not in k}
+            model_without_module.load_state_dict(checkpoint["model"], strict=True)
+            
             optimizer.load_state_dict(checkpoint["optimizer"])
             
             if 'gamma' in checkpoint['lr_scheduler']:
@@ -208,14 +329,23 @@ def main(args):
             if args.amp:
                 logger.log_text("Load Optimizer Scaler for AMP")
                 scaler.load_state_dict(checkpoint["scaler"])
+                
+            if 'temperature' in checkpoint:
+                model.module.decay_function.temperature = checkpoint['temperature']
+            else:
+                gamma = args.baseline_args['decay_settings']['gamma']
+                
+                for _ in range(args.start_epoch):
+                    model.module.decay_function.temperature *= gamma 
+                    
+            logger.log_text(f"Next Temperature for Training: {model.module.decay_function.temperature}")
             
         except Exception as e:
             logger.log_text(f"The resume file is not exist\n{e}")
-    
-    
+            
     if args.validate_only:
         logger.log_text(f"Start Only Validation")
-        results = gating_engines.evaluate(
+        results = running_engine.evaluate(
             model, val_loaders, args.data_cats, logger, args.num_classes)
             
         line="<First Evaluation Results>\n"
@@ -232,7 +362,7 @@ def main(args):
 
     if args.validate:
         logger.log_text(f"First Validation Start")
-        results = gating_engines.evaluate(
+        results = running_engine.evaluate(
             model, val_loaders, args.data_cats, logger, args.num_classes)
         
         line="<First Evaluation Results>\n"
@@ -246,8 +376,6 @@ def main(args):
         if args.resume_tmp:
             args.resume_tmp = False
 
-    
-    
     if args.start_epoch <= args.warmup_epoch:
         if args.warmup_epoch > 1:
             args.warmup_ratio = 1
@@ -292,7 +420,7 @@ def main(args):
 
         if not args.resume_tmp:
             # warmup_fn = get_warmup_scheduler if epoch == 0 else None
-            once_train_results = gating_engines.training(
+            once_train_results = running_engine.training(
                 model, 
                 optimizer, 
                 train_loaders, 
@@ -332,12 +460,10 @@ def main(args):
             
             logger.log_text(f"saved loss size in one epoch: {len(once_train_results[1][:-1])}")
             logger.log_text(f"saved size of total loss: {len(task_loss)}")
-                
-            # torch.distributed.barrier()
                             
             if args.output_dir:
                 checkpoint = {
-                    "model": model_without_ddp.state_dict(),
+                    "model": model_without_module.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "args": args,
                     "epoch": epoch
@@ -349,21 +475,20 @@ def main(args):
             if scaler is not None:
                 checkpoint["scaler"] = scaler.state_dict()
             
-            torch.distributed.barrier()
             logger.log_text("Save model temporary checkpoint...")
             save_file = os.path.join(args.output_dir, 'ckpts', f"checkpoint_tmp.pth")
             metric_utils.save_on_master(checkpoint, save_file)
             logger.log_text("Complete saving the temporary checkpoint!\n")
-        
-        coco_patient = 0
+            
+            if args.distributed: torch.distributed.barrier()
+            
         # evaluate after every epoch
         logger.log_text("Validation Start")
         time.sleep(2)
-        results = gating_engines.evaluate(
+        results = running_engine.evaluate(
                 model, val_loaders, args.data_cats, logger, args.num_classes
             )
         logger.log_text("Validation Finish\n{}".format('---'*60))
-        
         if "task_flops" in results:
             for dset, mac in results["task_flops"].items():
                 task_flops[dset].append(mac)
@@ -403,38 +528,54 @@ def main(args):
             logged_data = {dset: results[dset] for dset in args.task}
             tb_logger.update_scalars(
                 logged_data, epoch, proc='val'
-            )   
-        torch.distributed.barrier()
+            ) 
+        
         logger.log_text("Save model checkpoint...")
         save_file = os.path.join(args.output_dir, 'ckpts', f"checkpoint.pth")
         metric_utils.save_on_master(checkpoint, save_file)
         logger.log_text("Complete saving checkpoint!\n")
         
-        if args.lr_scheduler == 'multi' and epoch+1 in args.lr_steps:
-            torch.distributed.barrier()
-            logger.log_text("Save model checkpoint before lr decaying...")
+        if args.save_all_epoch:
             save_file = os.path.join(args.output_dir, 'ckpts', f"ckpt_{epoch}e.pth")
+            logger.log_text("Save per epoch checkpoint...")
             metric_utils.save_on_master(checkpoint, save_file)
             logger.log_text("Complete saving checkpoint!\n")
         
-        
         logger.log_text(f"Current Epoch: {epoch+1} / Last Epoch: {args.epochs}\n")       
         logger.log_text("Complete {} epoch\n{}\n\n".format(epoch+1, "###"*30))
-        torch.distributed.barrier()
+        if args.distributed: torch.distributed.barrier()
         
         if args.resume_tmp:
             args.resume_tmp = False
         
-        torch.cuda.synchronize()
+        if args.distributed: torch.cuda.synchronize()
         time.sleep(2)
     # End Training -----------------------------------------------------------------------------
     
     all_train_val_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(all_train_val_time)))
     
-    if is_main_process:
-        # tensor_loss_to_np = [[l.detach().cpu().numpy() for l in loss_list] for loss_list in task_loss]
-        loss_csv_path = os.path.join(csv_dir, f"allloss_result_gpu{args.gpu}.csv")
+    if args.distributed:
+        if is_main_process:
+            loss_csv_path = os.path.join(csv_dir, f"allloss_result_gpu{args.gpu}.csv")
+            with open(loss_csv_path, 'a') as f:
+                np.savetxt(f, task_loss, delimiter=',', header=one_str_header)
+                
+            one_str_header = ''
+            for i, dset in enumerate(args.task):
+                if i == len(header)-1:
+                    delim = ''
+                else:
+                    delim = ', '
+                one_str_header += dset + delim
+            task_header = one_str_header
+            
+            acc_csv_path = os.path.join(csv_dir, f"allacc_result_gpu{args.gpu}.csv")
+            with open(acc_csv_path, 'a') as f:
+                np.savetxt(f, task_acc, delimiter=',', header=task_header)
+    
+    else:
+        loss_csv_path = os.path.join(csv_dir, f"allloss_result.csv")
         with open(loss_csv_path, 'a') as f:
             np.savetxt(f, task_loss, delimiter=',', header=one_str_header)
             
@@ -447,22 +588,22 @@ def main(args):
             one_str_header += dset + delim
         task_header = one_str_header
         
-        acc_csv_path = os.path.join(csv_dir, f"allacc_result_gpu{args.gpu}.csv")
+        acc_csv_path = os.path.join(csv_dir, f"allacc_result.csv")
         with open(acc_csv_path, 'a') as f:
             np.savetxt(f, task_acc, delimiter=',', header=task_header)
-            
-        line = "FLOPs Result:\n"        
-        for dset in args.task:
-            line += f"{task_flops[dset]}\n"    
-        logger.log_text(line)
-        logger.log_text(f"FLOPS Results:\n{task_flops}")
-        logger.log_text("Best Epoch for each task: {}".format(best_epoch))
-        logger.log_text("Final Results: {}".format(best_results))
-        logger.log_text(f"Exp Case: {args.exp_case}")
-        logger.log_text(f"Save Path: {args.output_dir}")
-        
-        logger.log_text(f"Only Training Time: {str(datetime.timedelta(seconds=int(total_time)))}")
-        logger.log_text(f"Training + Validation Time {total_time_str}")
+      
+    line = "FLOPs Result:\n"        
+    for dset in args.task:
+        line += f"{task_flops[dset]}\n"    
+    logger.log_text(line)
+    logger.log_text(f"FLOPS Results:\n{task_flops}")
+    logger.log_text("Best Epoch for each task: {}".format(best_epoch))
+    logger.log_text("Final Results: {}".format(best_results))
+    logger.log_text(f"Exp Case: {args.exp_case}")
+    logger.log_text(f"Save Path: {args.output_dir}")
+    
+    logger.log_text(f"Only Training Time: {str(datetime.timedelta(seconds=int(total_time)))}")
+    logger.log_text(f"Training + Validation Time {total_time_str}")
 
 
 if __name__ == "__main__":

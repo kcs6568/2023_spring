@@ -35,8 +35,11 @@ BACKBONE=$5
 # cd ./run_main2.sh
 
 
-
-while :
-do
-    ./run_three.sh 29500 baseline 3 4 resnet50
+cnt=0
+while (( "${cnt}" < 2 )); do
+    ./run_three.sh 29500 7 4 resnet50 gating_ddp pcgrad KaiNorm_totMean_allReduceStHe_SP001
+    # ./run_three_retrain.sh 29500 3 4 resnet50 gating_ddp pcgrad KaiNorm_totMean_allReduce_SP0005
+    (( cnt = "${cnt}" + 1 ))
 done
+
+

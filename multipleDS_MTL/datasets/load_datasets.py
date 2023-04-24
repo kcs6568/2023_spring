@@ -23,7 +23,6 @@ def load_datasets(args, only_val=True):
     for data, cfg in args.task_cfg.items():
         args.batch_size = args.task_bs[data]
         if 'clf' in cfg['task']:
-            print(data)
             if data == 'cifar10':
                 test_ld = None
                 train_ld, val_ld = load_cifar10(args, data, '/root/data/pytorch_datasets')
@@ -34,7 +33,7 @@ def load_datasets(args, only_val=True):
             
             if data == 'stl10':
                 test_ld = None
-                train_ld, val_ld = load_stl10(args, data, '/root/data', input_size=cfg['input_size'])
+                train_ld, val_ld = load_stl10(args, data, '/root/data/pytorch_datasets', input_size=cfg['input_size'])
             
             elif data == 'imagenet1k':
                 test_ld = None
@@ -145,8 +144,8 @@ def load_cifar10(args, data, path):
     # train_loader, test_loader = get_dataloader(train_dataset, test_dataset, train_sampler, test_sampler, 
     #                                             args, args.batch_size)
     
-    train_loader = get_train_dataloader(train_dataset, train_sampler, args, args.batch_size)
-    test_loader = get_test_dataloader(test_dataset, test_sampler, args, args.batch_size)
+    train_loader = get_train_dataloader(train_dataset, train_sampler, args)
+    test_loader = get_test_dataloader(test_dataset, test_sampler, args)
     
     return train_loader, test_loader
 
@@ -527,9 +526,9 @@ def load_coco(args, data, data_path, trs_type='det'):
     train_loader = torch.utils.data.DataLoader(
         train_ds, batch_sampler=train_batch_sampler, num_workers=args.workers, collate_fn=coco_collate_fn
     )
-    
+        
     val_loader = torch.utils.data.DataLoader(
-        val_ds, batch_size=1, sampler=val_sampler, num_workers=args.workers, collate_fn=coco_collate_fn
+        val_ds, batch_size=args.batch_size, sampler=val_sampler, num_workers=args.workers, collate_fn=coco_collate_fn
     )
     
     test_loader = None
@@ -580,10 +579,10 @@ def load_voc(args, data, task_type, task_cfg):
     # args.pin_memory = True  
     
     train_loader = get_train_dataloader(
-        train_ds, train_sampler, args, args.batch_size, collate_fn=voc_collate_fn(task_type))
+        train_ds, train_sampler, args, collate_fn=voc_collate_fn(task_type))
     
     val_loader = get_test_dataloader(
-       val_ds, val_sampler, args, bs=1, collate_fn=voc_collate_fn(task_type))
+       val_ds, val_sampler, args, collate_fn=voc_collate_fn(task_type))
     
     return train_loader, val_loader, test_loader
 

@@ -1,6 +1,7 @@
 import math
 import sys
 import time
+import random
 import datetime
 from collections import OrderedDict
 
@@ -16,9 +17,9 @@ BREAK=False
 
 
 class LossCalculator:
-    def __init__(self, type, data_cats, loss_ratio, task_weights=None, method='multi_task') -> None:
+    def __init__(self, type, data_cats, loss_ratio, task_weights=None, weighting_method=None) -> None:
         self.type = type
-        self.method = method
+        self.weighting_method = weighting_method
         self.data_cats = data_cats
         
         if self.type == 'balancing':
@@ -45,9 +46,23 @@ class LossCalculator:
     
     def general_loss(self, output_losses):
         assert isinstance(output_losses, dict)
-        losses = sum(loss for loss in output_losses.values())
         
-        return losses
+        logging_dict = None
+        if self.weighting_method is None: losses = sum(loss for loss in output_losses.values())
+        else:
+            task_losses = {} #{data: sum(loss for k, loss in output_losses.items() if data in k) for data in self.data_cats}
+            
+            for data in self.data_cats:
+                task_loss = 0.
+                for loss_key, loss in output_losses.items():
+                    task_loss += loss
+                    if data in loss_key: task_losses[data] = task_loss
+                    
+            logging_dict = self.weighting_method(task_losses)
+            losses = sum(loss for loss in logging_dict.values())
+        
+                
+        return losses, logging_dict
 
 
 def training(model, optimizer, data_loaders, 
@@ -55,6 +70,7 @@ def training(model, optimizer, data_loaders,
           tb_logger, scaler, args,
           warmup_sch=None):
     model.train()
+    module = model.module
     
     metric_logger = metric_utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter("main_lr", metric_utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
@@ -83,12 +99,15 @@ def training(model, optimizer, data_loaders,
     else:
         logger.log_text("No Warmup Training")
     
+    weighting_method = None if module.weighting_method is None else module.weighting_method
+    grad_method = None if module.grad_method is None else module.grad_method
+    
     if args.lossbal:
         loss_calculator = LossCalculator(
-            'balancing', args.task_per_dset, args.loss_ratio, method=args.method)
+            'balancing', args.task_per_dset, args.loss_ratio, weighting_method=weighting_method)
     elif args.general:
         loss_calculator = LossCalculator(
-            'general', args.task_per_dset, args.loss_ratio, method=args.method)
+            'general', args.task_per_dset, args.loss_ratio, weighting_method=weighting_method)
     
     start_time = time.time()
     end = time.time()
@@ -97,9 +116,11 @@ def training(model, optimizer, data_loaders,
     loss_for_save = None
     
     all_iter_losses = []
-    clip_value = torch.tensor(args.grad_clip_value, dtype=torch.float)
-    min_grad = torch.neg(clip_value) if clip_value > 0 else clip_value
-    max_grad = clip_value if clip_value > 0 else torch.neg(clip_value)
+    
+    if args.grad_clip_value is not None:
+        clip_value = torch.tensor(args.grad_clip_value, dtype=torch.float)
+        min_grad = torch.neg(clip_value) if clip_value > 0 else clip_value
+        max_grad = clip_value if clip_value > 0 else torch.neg(clip_value)
     
     for i, b_data in enumerate(biggest_dl):
         # print("iteration ",i)
@@ -141,13 +162,49 @@ def training(model, optimizer, data_loaders,
         
         input_set = metric_utils.preprocess_data(input_dicts, args.task_per_dset)
         
+        loss_dict = {}
+        grad_dict = {}
+        weighted_loss = 0
         with torch.cuda.amp.autocast(enabled=scaler is not None):
-            loss_dict = model(input_set, other_args)
-        # print(loss_dict)
-        # torch.cuda.synchronize()
-        
-        losses = loss_calculator.loss_calculator(loss_dict)
-        loss_dict_reduced = metric_utils.reduce_dict(loss_dict)
+            for ti, dset in enumerate(datasets):
+                module.encoder.zero_grad()
+                task_loss = module({dset: input_set[dset]},
+                                   {'task_list': {dset: args.task_per_dset[dset]}})
+                
+                loss_dict.update(task_loss)
+                if weighting_method is not None:
+                    loss, logging_dict = loss_calculator.loss_calculator(task_loss)
+                    weighted_loss += loss
+                    loss_dict.update(logging_dict)
+                    
+                else:
+                    loss = sum(l for l in task_loss.values())
+                    
+                model.reducer.prepare_for_backward(loss)
+                loss.backward()
+                
+                if args.grad_clip_value is not None:
+                    if 'coco' in dset:
+                        params = [p for n, p in model.named_parameters() if p.requires_grad if 'encoder' in n if dset in n if 'fpn' in n]
+                    else:
+                        params = [p for n, p in model.named_parameters() if p.requires_grad if 'encoder' in n if dset in n]
+                    
+                    torch.nn.utils.clip_grad_norm_( # clip gradient values to maximum 1.0
+                        # [p for n, p in model.named_parameters() if p.requires_grad if 'encoder' in n],
+                        params,
+                        args.grad_clip_value)
+                
+                grad_dict[dset] = module.grad2vec(clone_grad=True)
+                dist.all_reduce(grad_dict[dset])
+                grad_dict[dset] /= dist.get_world_size()
+                
+                
+        if weighted_loss != 0:
+            losses = weighted_loss
+        else:
+            losses, logging_dict = loss_calculator.loss_calculator(loss_dict)                
+            
+        loss_dict_reduced = metric_utils.reduce_dict(loss_dict, average=False)
         losses_reduced = sum(loss for loss in loss_dict_reduced.values())
         loss_value = losses_reduced.item()
         if not math.isfinite(loss_value):
@@ -171,79 +228,35 @@ def training(model, optimizer, data_loaders,
             scaler.step(optimizer)
             scaler.update()
             
-        
         else:
             optimizer.zero_grad(set_to_none=args.grad_to_none)
-            losses.backward()
-            
-            # for d in datasets:
-            #     sums = sum(loss for k, loss in loss_dict.items() if d in k)
+            if grad_method is None:
+                losses.backward()
                 
-            #     optimizer.zero_grad(set_to_none=args.grad_to_none)
-            #     sums.backward(retain_graph=True)
-                
-            # exit()
+                if args.grad_clip_value is not None:
+                    torch.nn.utils.clip_grad_norm_( # clip gradient values to maximum 1.0
+                            [p for p in model.parameters() if p.requires_grad], args.grad_clip_value)
             
-            # torch.nn.utils.clip_grad_norm_( # clip gradient values to maximum 1.0
-            #             [p for p in model.parameters() if p.requires_grad], args.grad_clip_value)
-            
-            # b = 0.
-            # d = 0.
-            # for m, p in model.module.blocks.named_parameters():
-            #     if torch.any(torch.isinf(p.grad)): print("block inf", m)
-            #     if torch.any(torch.isnan(p.grad)): print("block Nan", m)
-            #     b += p.grad.norm()
-            
-            # for m, p in model.module.ds.named_parameters():
-            #     if torch.any(torch.isinf(p.grad)): print("block inf", m)
-            #     if torch.any(torch.isnan(p.grad)): print("block Nan", m)
-            #     d += p.grad.norm()
-            
-            # print(b+d)
+            else:
+                module.compute_newgrads(
+                    grad_dict, cur_iter=i, total_mean_grad=args.total_mean_grad)
                     
-            # stems = []
-            # for d in datasets:
-            #     s = 0.
-            #     for p in model.module.stem_dict[d].parameters():
-            #         s += p.grad.norm()
-            #     stems.append(s)
-                
-            # heads = []
-            # for d in datasets:
-            #     s = 0.
-            #     for p in model.module.head_dict[d].parameters():
-            #         s += p.grad.norm()
-            #     heads.append(s)
-            
-            
-            # print(stems)
-            # print(heads)
-            
-            # exit()
-            
-            
-            if args.grad_clip_value is not None:
-                torch.nn.utils.clip_grad_norm_( # clip gradient values to maximum 1.0
-                        [p for p in model.parameters() if p.requires_grad], args.grad_clip_value)
-                # for p in model.parameters():
-                #     if p.requires_grad and p.grad is not None: torch.clamp_(p.grad, min=min_grad, max=max_grad)
-            optimizer.step()           
-            
+            optimizer.step()
+        
+        
+        if warmup_sch is not None: warmup_sch.step()
+        
         # for n, p in model.named_parameters():
         #     if p.grad is None:
         #         print(f"{n} has no grad")
         # exit()
-        
-        if warmup_sch is not None:
-            warmup_sch.step()
         
         dist.all_reduce(losses)
         metric_logger.update(main_lr=optimizer.param_groups[0]["lr"])
         metric_logger.update(loss=losses, **loss_dict_reduced)
         iter_time.update(time.time() - end) 
         
-        if BREAK:
-            args.print_freq = 10
+        if BREAK: args.print_freq = 10
         
         if (i % args.print_freq == 0 or i == (biggest_size - 1)) and get_rank() == 0:
             metric_logger.log_iter(
@@ -252,32 +265,28 @@ def training(model, optimizer, data_loaders,
                 logger,
                 i
             )
-            # logger.log_text(f"Clipped GradNorm: {clipped_norm}")
             
-        if tb_logger:
-            tb_logger.update_scalars(loss_dict_reduced, i)   
-
-            '''
-            If the break block is in this block, the gpu memory will stuck (bottleneck)
-            '''
+            if weighting_method is not None: 
+                if weighting_method.print_str: logger.log_text(str(weighting_method))
             
-        # if BREAK and i == args.print_freq:
-        if BREAK and i == 2:
-            print("BREAK!!")
-            # torch.cuda.synchronize()
-            break
+            if grad_method is not None:
+                if grad_method.print_str: logger.log_text(str(grad_method))
+                if hasattr(grad_method, 'weighting_method'): logger.log_text(str(grad_method.weighting_method))
             
+        if tb_logger: tb_logger.update_scalars(loss_dict_reduced, i)   
+        if BREAK and i == 2: print("BREAK!!"); break
+        if torch.cuda.is_available(): torch.cuda.synchronize(torch.cuda.current_device)
         end = time.time()
-        
-        # if torch.cuda.is_available():
-        #     torch.cuda.synchronize(torch.cuda.current_device)
-        
-        # logger.log_text(f"{i} iter finished\n")
-        # torch.cuda.synchronize()
         
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.log_text(f"{header} Total time: {total_time_str} ({total_time / biggest_size:.4f} s / it)")
+    
+    if hasattr(grad_method, "after_iter"):
+        grad_method.after_iter()
+    
+    if hasattr(weighting_method, "after_iter"):
+        weighting_method.after_iter()
     
     del data_loaders
     torch.cuda.empty_cache()
@@ -347,6 +356,7 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         logger.log_text("Metric logger synch start")
         metric_logger.synchronize_between_processes()
         logger.log_text("Metric logger synch finish\n")
+        
         logger.log_text("COCO evaluator synch start")
         coco_evaluator.synchronize_between_processes()
         logger.log_text("COCO evaluator synch finish\n")
@@ -354,8 +364,10 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         # accumulate predictions from all images
         coco_evaluator.accumulate()
         logger.log_text("Finish accumulation")
+        
         coco_evaluator.summarize()
         logger.log_text("Finish summarization")
+        
         coco_evaluator.log_eval_summation()
         torch.set_num_threads(n_threads)
         
@@ -363,7 +375,6 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
     
     
     def _validate_segmentation(outputs, targets, start_time=None):
-        # print("######### entered seg validate")
         confmat.update(targets.flatten(), outputs['outputs'].argmax(1).flatten())
         
         
@@ -421,12 +432,6 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
     # from ptflops import get_model_complexity_info
     from lib.utils.flop_counters.ptflops import get_model_complexity_info
     for dataset, taskloader in data_loaders.items():
-        if 'coco' in dataset or 'voc' in dataset:
-            dense_shape.update({dataset: []})
-            is_dense = True
-        else:
-            is_dense = False
-        
         task = data_cats[dataset]
         dset_classes = num_classes[dataset]
         
@@ -468,6 +473,7 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
             '''
             batch_set = metric_utils.preprocess_data(batch_set, data_cats)
 
+
             iter_start_time = time.time()
             macs, _, outputs = get_model_complexity_info(
                 model, batch_set, dataset, task, as_strings=False,
@@ -477,8 +483,10 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
             torch.cuda.synchronize()
             iter_time.update(time.time() - iter_start_time) 
             mac_count += macs
-            
             val_function(outputs, batch_set[dataset][1], iter_start_time)
+            
+            # if i == 9: break
+            
             torch.cuda.synchronize()
             if ((i % 50 == 0) or (i == len(taskloader) - 1)) and get_rank() == 0:
                 metric_logger.log_iter(

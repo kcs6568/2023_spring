@@ -49,7 +49,7 @@ class TrainParser:
         parser.add_argument("--warmup-ratio", type=float, default=0.6)
         parser.add_argument("--warmup-epoch", type=int, default=1)
         parser.add_argument("--start_epoch", default=0, type=int, help="start epoch")
-        parser.add_argument("--epochs", default=145, type=int, metavar="N", help="number of total epochs to run")
+        parser.add_argument("--epochs", default=12, type=int, help="number of total epochs to run")
         parser.add_argument("--opt", type=str, default='sgd')
         parser.add_argument(
             "--lr",

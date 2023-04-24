@@ -9,7 +9,7 @@ TRAIN_ROOT=/root/2023_spring/multipleDS_MTL
 KILL_PROC="kill $(ps aux | grep static_train.py | grep -v grep | awk '{print $2}')"
 TRAIN_FILE=static_train.py
 TRAIN_SCRIPT=$TRAIN_ROOT/$TRAIN_FILE
-$KILL_PROC
+# $KILL_PROC
 # exit 1 
 
 
@@ -42,19 +42,14 @@ done
 #     CFG_PATH=/root/src/gated_mtl/cfgs/four_task/static/cifar10_stl10_minicoco_voc_city
 # fi
 
-if [ $5 = resnet50 ]
-then
-    YAML_CFG=resnet50_clf_det_seg_$2.yaml
-fi
+YAML_CFG=$5_clf_det_seg_$2.yaml
+CFG_PATH=$TRAIN_ROOT/cfgs/four_task/static/cifar10_minicoco_voc/$YAML_CFG
 
-CFG_PATH=/root/src/gated_mtl/cfgs/four_task/static/cifar10_stl10_minicoco_voc/$YAML_CFG
-
-
-SCH="multi"
+SCH="multi cosine"
 OPT="adamw"
 LR="1e-4"
 GAMMA="0.1"
-ADD_DISC="AMP_general_fromScratch"
+ADD_DISC="[from_original_code]_static_baseline"
 
 for sch in $SCH
 do
@@ -74,12 +69,12 @@ do
                     exp_case="$exp_case"_$ADD_DISC
                 fi
 
-                CUDA_VISIBLE_DEVICES=$DEVICES python -m torch.distributed.launch --nproc_per_node=$4 --master_port=$1 \
+                CUDA_VISIBLE_DEVICES=$DEVICES torchrun --nproc_per_node=$4 --master_port=$1 \
                     $TRAIN_SCRIPT --general \
                     --cfg $CFG_PATH \
                     --warmup-ratio -1 --workers 4 --grad-clip-value 1 \
-                    --exp-case $exp_case --approach $2 \
-                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --resume
+                    --exp-case $exp_case --approach $2 --grad-to-none \
+                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma
 
                 sleep 5
 

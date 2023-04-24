@@ -21,7 +21,7 @@ from lib.utils.sundries import set_args
 from lib.utils.logger import TextLogger, TensorBoardLogger
 
 from lib.apis.warmup import get_warmup_scheduler
-from lib.apis.optimization import get_optimizer, get_scheduler
+from lib.apis.optimization import get_optimizer, get_optimizer_for_gating, get_scheduler
 from lib.model_api.build_model import build_model
 
 
@@ -46,12 +46,24 @@ def main(args):
     # os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
     metric_utils.mkdir(args.output_dir) # master save dir
     metric_utils.mkdir(os.path.join(args.output_dir, 'ckpts')) # checkpoint save dir
-    torch.set_printoptions(linewidth=150)
-    # distributed.init_process_group(
-    #     ackend=args.dist_backend, init_method=args.dist_url, 
-    #     world_size=args.world_size, rank=args.rank, timeout=time.timedelta(seconds=120))
+    torch.set_printoptions(linewidth=300)
+    
     init_distributed_mode(args)
-    # setup_for_distributed(args.rank == 0)
+    
+    if not args.distributed:
+        rank_list = [int(device) for device in list(os.environ['CUDA_VISIBLE_DEVICES'].split(","))]
+        rank_list.sort()
+        first_device_id = rank_list[0]
+        rank_list = [d - first_device_id for d in rank_list]
+        args.seed = sum(rank_list)
+        
+        num_gpus = len(rank_list)
+        args.num_gpus = num_gpus
+        args.task_bs = {dset: bs*num_gpus for dset, bs in args.task_bs.items()}
+        
+        from engines import DP_gating_engines as running_engine
+    else:
+        from engines import gating_engines as running_engine
     
     metric_utils.set_random_seed(args.seed)
     log_dir = os.path.join(args.output_dir, 'logs')
@@ -102,20 +114,36 @@ def main(args):
     logger.log_text(f"Freeze Shared Backbone Network: {args.freeze_backbone}")
     
     model = build_model(args)
+    
     if args.retrain_phase:
         setattr(model, 'retrain_phase', True)
         retrain_args = args.retrain_args
         args.epochs = retrain_args['epoch']
-        args.opt = retrain_args['optimizer']
         
-        args.lr_scheduler = retrain_args['scheduler']
-        if retrain_args['scheduler'] == 'multi':
-            args.lr_steps = retrain_args['scheduler_step']
-        elif retrain_args['scheduler'] == 'step':
-            args.step_size = retrain_args['step_size']
+        # if args.lr_scheduler == 'multi':
+        #     assert max(retrain_args['scheduler_step']) < retrain_args['epoch']
+        #     args.lr_steps = retrain_args['scheduler_step']
+        # elif args.lr_scheduler == 'step':
+        #     args.step_size = retrain_args['step_size']
+            
+        if 'gate_opt' in args or 'gate_opt' is not None:
+            args.gate_opt = None
         
-        gated_weight = torch.load(retrain_args['gated_weight'], map_location=torch.device('cpu'))
-        model.load_state_dict(gated_weight['model'], strict=False)
+        if retrain_args['gated_weight'] == 'mine':
+            gating_path = os.path.join(args.output_dir, 'ckpts', f"checkpoint.pth")
+        else: gating_path = retrain_args['gated_weight']
+        gated_weight = torch.load(gating_path, map_location=torch.device('cpu'))['model']
+        
+        ignore_keys = ['weighting_method', 'grad_method']
+        
+        if ignore_keys is not None:
+            with torch.no_grad():
+                for n, p in model.named_parameters():
+                    checklist = torch.zeros(len(ignore_keys)).bool()
+                    for i in range(len(ignore_keys)): checklist[i] = ignore_keys[i] in n
+                    if not torch.all(checklist): p.copy_(gated_weight[n])
+        else:
+            model.load_state_dict(gated_weight['model'], strict=False)
         model.fix_gate()
         logger.log_text(str(model))
         
@@ -131,8 +159,19 @@ def main(args):
     
     else: 
         setattr(model, 'retrain_phase', False)
+        
+    if args.only_gate_train:
+        learnable_params = ['gating', 'weighting']
+        for n, p in model.named_parameters():
+            checklist = torch.zeros(len(learnable_params)).bool()
+            for i in range(len(learnable_params)): checklist[i] = not learnable_params[i] in n
+            if torch.all(checklist): p.requires_grad = False
+            
+        setattr(model, 'only_gate_train', args.only_gate_train)
     
-    optimizer = get_optimizer(args, model)
+    
+    if args.gate_opt is not None: optimizer = get_optimizer_for_gating(args, model)
+    else: optimizer = get_optimizer(args, model)
     logger.log_text(f"Optimizer:\n{optimizer}")
     logger.log_text(f"Apply AMP: {args.amp}")
     scaler = torch.cuda.amp.GradScaler() if args.amp else None
@@ -151,33 +190,12 @@ def main(args):
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         model = torch.nn.parallel.DistributedDataParallel(model,
                                                           device_ids=[args.gpu])
-        model_without_ddp = model.module
+        model_without_module = model.module
         
     else:
-        model.cuda()
-        
-    
-    # checkpoint = {
-    #                 "model": model_without_ddp.state_dict(),
-    #                 "optimizer": optimizer.state_dict(),
-    #             }
-    
-    # root = "/root/volume/exp/resnet50_fasterrcnn_fcn/triple/cifar10_minicoco_voc/gating/baseline/nGPU4_multi_adamw_lr1e-5_gamma0.1_[Ret]SepBlockIden_SW0002_Temp5G08_ReLU/ckpts/"
-    # save_file = root + "tmp.pth"
-    # metric_utils.save_on_master(checkpoint, save_file)
-    
-    # load_weight = "/root/volume/exp/resnet50_fasterrcnn_fcn/triple/cifar10_minicoco_voc/gating/baseline/nGPU4_multi_adamw_lr1e-5_gamma0.1_[Ret]SepBlockIden_SW0002_Temp5G08_ReLU/ckpts/tmp.pth"
-    
-    # ckpt = torch.load(load_weight, map_location='cpu')
-    # model.module.load_state_dict(ckpt['model'])
-    # optimizer.load_state_dict(ckpt['optimizer'])
-    
-    
-    
-    
-    # exit()
-        
-    
+        model = torch.nn.DataParallel(model, device_ids=rank_list)
+        model = model.to("cuda")
+        model_without_module = model.module
         
     logger.log_text(f"Model Configuration:\n{model}")
     metric_utils.get_params(model, logger, False)
@@ -201,7 +219,7 @@ def main(args):
             
             # if args.retrain_phase:
             #     checkpoint['model'] = {k: v for k, v in checkpoint['model'].items() if 'task_gating_params' not in k}
-            model_without_ddp.load_state_dict(checkpoint["model"], strict=True)
+            model_without_module.load_state_dict(checkpoint["model"], strict=True)
             
             optimizer.load_state_dict(checkpoint["optimizer"])
             
@@ -258,14 +276,25 @@ def main(args):
             if args.amp:
                 logger.log_text("Load Optimizer Scaler for AMP")
                 scaler.load_state_dict(checkpoint["scaler"])
+                
+            if 'temperature' in checkpoint:
+                model.module.decay_function.temperature = checkpoint['temperature']
+            else:
+                gamma = args.baseline_args['decay_settings']['gamma']
+                
+                for _ in range(args.start_epoch):
+                    model.module.decay_function.temperature *= gamma 
+                    
+            logger.log_text(f"Next Temperature for Training: {model.module.decay_function.temperature}")
             
         except Exception as e:
             logger.log_text(f"The resume file is not exist\n{e}")
+            
     
     
     if args.validate_only:
         logger.log_text(f"Start Only Validation")
-        results = gating_engines.evaluate(
+        results = running_engine.evaluate(
             model, val_loaders, args.data_cats, logger, args.num_classes)
             
         line="<First Evaluation Results>\n"
@@ -282,7 +311,7 @@ def main(args):
 
     if args.validate:
         logger.log_text(f"First Validation Start")
-        results = gating_engines.evaluate(
+        results = running_engine.evaluate(
             model, val_loaders, args.data_cats, logger, args.num_classes)
         
         line="<First Evaluation Results>\n"
@@ -340,7 +369,7 @@ def main(args):
 
         if not args.resume_tmp:
             # warmup_fn = get_warmup_scheduler if epoch == 0 else None
-            once_train_results = gating_engines.training(
+            once_train_results = running_engine.training(
                 model, 
                 optimizer, 
                 train_loaders, 
@@ -380,12 +409,10 @@ def main(args):
             
             logger.log_text(f"saved loss size in one epoch: {len(once_train_results[1][:-1])}")
             logger.log_text(f"saved size of total loss: {len(task_loss)}")
-                
-            # torch.distributed.barrier()
                             
             if args.output_dir:
                 checkpoint = {
-                    "model": model_without_ddp.state_dict(),
+                    "model": model_without_module.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "args": args,
                     "epoch": epoch
@@ -401,12 +428,13 @@ def main(args):
             save_file = os.path.join(args.output_dir, 'ckpts', f"checkpoint_tmp.pth")
             metric_utils.save_on_master(checkpoint, save_file)
             logger.log_text("Complete saving the temporary checkpoint!\n")
-            torch.distributed.barrier()
+            
+            if args.distributed: torch.distributed.barrier()
             
         # evaluate after every epoch
         logger.log_text("Validation Start")
         time.sleep(2)
-        results = gating_engines.evaluate(
+        results = running_engine.evaluate(
                 model, val_loaders, args.data_cats, logger, args.num_classes
             )
         logger.log_text("Validation Finish\n{}".format('---'*60))
@@ -462,42 +490,41 @@ def main(args):
             metric_utils.save_on_master(checkpoint, save_file)
             logger.log_text("Complete saving checkpoint!\n")
         
-        
-        # logger.log_text("Save model checkpoint...")
-        # save_file = os.path.join(args.output_dir, 'ckpts', f"checkpoint.pth")
-        # metric_utils.save_on_master(checkpoint, save_file)
-        # logger.log_text("Complete saving checkpoint!\n")
-        
-        # if args.lr_scheduler == 'multi' and epoch+1 in args.lr_steps:
-        #     torch.distributed.barrier()
-        #     logger.log_text("Save model checkpoint before lr decaying...")
-        #     save_file = os.path.join(args.output_dir, 'ckpts', f"ckpt_{epoch}e.pth")
-        #     metric_utils.save_on_master(checkpoint, save_file)
-        #     logger.log_text("Complete saving checkpoint!\n")
-        
-        # logger.log_text("Save model checkpoint all epoch")
-        # save_file = os.path.join(args.output_dir, 'ckpts', f"ckpt_{epoch}e.pth")
-        # metric_utils.save_on_master(checkpoint, save_file)
-        # logger.log_text("Complete saving checkpoint!\n")
-        
-        
         logger.log_text(f"Current Epoch: {epoch+1} / Last Epoch: {args.epochs}\n")       
         logger.log_text("Complete {} epoch\n{}\n\n".format(epoch+1, "###"*30))
-        torch.distributed.barrier()
+        if args.distributed: torch.distributed.barrier()
         
         if args.resume_tmp:
             args.resume_tmp = False
         
-        torch.cuda.synchronize()
+        if args.distributed: torch.cuda.synchronize()
         time.sleep(2)
     # End Training -----------------------------------------------------------------------------
     
     all_train_val_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(all_train_val_time)))
     
-    if is_main_process:
-        # tensor_loss_to_np = [[l.detach().cpu().numpy() for l in loss_list] for loss_list in task_loss]
-        loss_csv_path = os.path.join(csv_dir, f"allloss_result_gpu{args.gpu}.csv")
+    if args.distributed:
+        if is_main_process:
+            loss_csv_path = os.path.join(csv_dir, f"allloss_result_gpu{args.gpu}.csv")
+            with open(loss_csv_path, 'a') as f:
+                np.savetxt(f, task_loss, delimiter=',', header=one_str_header)
+                
+            one_str_header = ''
+            for i, dset in enumerate(args.task):
+                if i == len(header)-1:
+                    delim = ''
+                else:
+                    delim = ', '
+                one_str_header += dset + delim
+            task_header = one_str_header
+            
+            acc_csv_path = os.path.join(csv_dir, f"allacc_result_gpu{args.gpu}.csv")
+            with open(acc_csv_path, 'a') as f:
+                np.savetxt(f, task_acc, delimiter=',', header=task_header)
+    
+    else:
+        loss_csv_path = os.path.join(csv_dir, f"allloss_result.csv")
         with open(loss_csv_path, 'a') as f:
             np.savetxt(f, task_loss, delimiter=',', header=one_str_header)
             
@@ -510,22 +537,22 @@ def main(args):
             one_str_header += dset + delim
         task_header = one_str_header
         
-        acc_csv_path = os.path.join(csv_dir, f"allacc_result_gpu{args.gpu}.csv")
+        acc_csv_path = os.path.join(csv_dir, f"allacc_result.csv")
         with open(acc_csv_path, 'a') as f:
             np.savetxt(f, task_acc, delimiter=',', header=task_header)
-            
-        line = "FLOPs Result:\n"        
-        for dset in args.task:
-            line += f"{task_flops[dset]}\n"    
-        logger.log_text(line)
-        logger.log_text(f"FLOPS Results:\n{task_flops}")
-        logger.log_text("Best Epoch for each task: {}".format(best_epoch))
-        logger.log_text("Final Results: {}".format(best_results))
-        logger.log_text(f"Exp Case: {args.exp_case}")
-        logger.log_text(f"Save Path: {args.output_dir}")
-        
-        logger.log_text(f"Only Training Time: {str(datetime.timedelta(seconds=int(total_time)))}")
-        logger.log_text(f"Training + Validation Time {total_time_str}")
+      
+    line = "FLOPs Result:\n"        
+    for dset in args.task:
+        line += f"{task_flops[dset]}\n"    
+    logger.log_text(line)
+    logger.log_text(f"FLOPS Results:\n{task_flops}")
+    logger.log_text("Best Epoch for each task: {}".format(best_epoch))
+    logger.log_text("Final Results: {}".format(best_results))
+    logger.log_text(f"Exp Case: {args.exp_case}")
+    logger.log_text(f"Save Path: {args.output_dir}")
+    
+    logger.log_text(f"Only Training Time: {str(datetime.timedelta(seconds=int(total_time)))}")
+    logger.log_text(f"Training + Validation Time {total_time_str}")
 
 
 if __name__ == "__main__":

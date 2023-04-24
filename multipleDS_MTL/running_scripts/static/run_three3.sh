@@ -53,7 +53,20 @@ SCH="cosine"
 OPT="adamw"
 LR="1e-4"
 GAMMA="0.1"
-ADD_DISC="LeakyReLU_noPreW"
+DESC_PART=""
+
+if [ -z $7 ]
+then
+    ADD_DESC=$DESC_PART
+else
+    if [ -z $DESC_PART ]
+    then
+        ADD_DESC=$7
+    else
+        ADD_DESC=$7_$DESC_PART
+    fi
+fi
+
 
 for sch in $SCH
 do
@@ -64,21 +77,21 @@ do
         do
             for lr in $LR
             do
-                exp_case=nGPU"$4"_"$sch"_"$opt"_lr"$lr"
+                exp_case=nGPU"$3"_"$sch"_"$opt"_lr"$lr"
                 
                 if [ $sch != "cosine" ]
                 then
-                    exp_case="$exp_case"_gamma"$gamma"_$ADD_DISC
+                    exp_case="$exp_case"_gamma"$gamma"_$ADD_DESC
                 else
-                    exp_case="$exp_case"_$ADD_DISC
+                    exp_case="$exp_case"_$ADD_DESC
                 fi
 
-                CUDA_VISIBLE_DEVICES=$DEVICES torchrun --nproc_per_node=$4 --master_port=$1 \
+                CUDA_VISIBLE_DEVICES=$DEVICES torchrun --nproc_per_node=$3 --master_port=$1 \
                     $TRAIN_SCRIPT --general \
                     --cfg $CFG_PATH \
-                    --warmup-ratio 0.6 --workers 4 --grad-clip-value 1 \
-                    --exp-case $exp_case --approach $2 --grad-to-none \
-                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --save-all-epoch
+                    --warmup-ratio -1 --workers 4 --grad-clip-value 1 \
+                    --exp-case $exp_case --grad-to-none \
+                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma
 
                 sleep 5
 

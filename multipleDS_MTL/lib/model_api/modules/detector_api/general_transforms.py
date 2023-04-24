@@ -1,4 +1,7 @@
 import math
+import numpy as np
+from copy import deepcopy
+
 import torch
 import torchvision
 
@@ -79,13 +82,20 @@ class GeneralizedRCNNTransform(nn.Module):
             min_size = (min_size,)
         self.min_size = min_size
         self.max_size = max_size
-        self.image_mean = torch.as_tensor(image_mean)[:, None, None].cuda()
-        self.image_std = torch.as_tensor(image_std)[:, None, None].cuda()
+        # self.image_mean = torch.as_tensor(image_mean)[:, None, None]
+        # self.image_std = torch.as_tensor(image_std)[:, None, None]
+        self.image_mean = torch.as_tensor(image_mean)[:, None, None]
+        self.image_std = torch.as_tensor(image_std)[:, None, None]
         self.size_divisible = size_divisible
         self.fixed_size = fixed_size
-        
         self.save_origin_size = []
 
+    
+    def set_cuda_mean_std(self):
+        self.image_mean = self.image_mean.to(torch.cuda.current_device())
+        self.image_std = self.image_std.to(torch.cuda.current_device())
+    
+    
     def forward(self,
                 images: List[Tensor],
                 targets: Optional[List[Dict[str, Tensor]]] = None
@@ -103,6 +113,7 @@ class GeneralizedRCNNTransform(nn.Module):
                     data[k] = v
                 targets_copy.append(data)
             targets = targets_copy
+        
         for i in range(len(images)):
             image = images[i]
             target_index = targets[i] if targets is not None else None
@@ -110,12 +121,12 @@ class GeneralizedRCNNTransform(nn.Module):
             if image.dim() != 3:
                 raise ValueError("images is expected to be a list of 3d tensors "
                                  "of shape [C, H, W], got {}".format(image.shape))
+                
             image = self.normalize(image)
             image, target_index = self.resize(image, target_index)
             images[i] = image
             if targets is not None and target_index is not None:
                 targets[i] = target_index
-
         image_sizes = [img.shape[-2:] for img in images]
         images = self.batch_images(images, size_divisible=self.size_divisible)
         image_sizes_list: List[Tuple[int, int]] = []
@@ -140,11 +151,17 @@ class GeneralizedRCNNTransform(nn.Module):
         # print(std)
         # print(self.image_mean.size())
         # print(self.image_std.size())
+        
+        # print(image.device, self.image_mean.device, self.image_std.device)
         # dtype, device = image.dtype, image.device
         # mean = torch.as_tensor(self.image_mean, dtype=dtype, device=device)
         # std = torch.as_tensor(self.image_std, dtype=dtype, device=device)
-        # return (image - mean[:, None, None]) / std[:, None, None]
         
+        # print(image.device, mean.device, std.device)
+        
+        # return (image - mean) / std
+        
+        self.set_cuda_mean_std()
         return (image - self.image_mean) / self.image_std
 
     def torch_choice(self, k: List[int]) -> int:
@@ -206,48 +223,116 @@ class GeneralizedRCNNTransform(nn.Module):
         return torch.stack(padded_imgs)
 
     def max_by_axis(self, the_list: List[List[int]]) -> List[int]:
-        maxes = the_list[0]
+        maxes = deepcopy(the_list[0])
         for sublist in the_list[1:]:
             for index, item in enumerate(sublist):
                 maxes[index] = max(maxes[index], item)
         return maxes
 
     
-    def match_all_batches(self, images: List[Tensor]):
+    def match_all_batches_targets(self, images: List[Tensor], targets):
         self.save_origin_size = [list(img.shape) for img in images]
-        # max_size = self.max_by_axis([list(img.shape) for img in images])
         
         max_size = self.max_by_axis(self.save_origin_size)
-        # print(max_size)
         batch_shape = [len(images)] + max_size
-        # print(batch_shape)
-        # print(images[0].size())
         batched_imgs = images[0].new_full(batch_shape, 0)
-        # print(batched_imgs)
-        # print(batched_imgs.size())
         for idx, img in enumerate(images):
-            if img.shape[-2:] == max_size[-2:]: continue
-            batched_imgs[idx] = tv_F.crop(img, 0, 0, max_size[-2], max_size[-1])
-            # print(idx, img.size(), batched_imgs[idx].size())
+            if img.shape[-2:] == max_size[-2:]: batched_imgs[idx,:,:,:].copy_(img)
+            else: batched_imgs[idx] = tv_F.crop(img, 0, 0, max_size[-2], max_size[-1])
+            assert torch.equal(img, batched_imgs[idx, :, :img.shape[-2], :img.shape[-1]])
+        
+        self.keys = list(targets[0].keys())
+        self.origin_size = [{k: v.size() for k, v in d.items()} for d in targets]
+
+        gt_sizes = np.array([[len(src[k])for k in self.keys] for src in targets])
+        each_max = np.max(gt_sizes, axis=0) # axis=0: row
+        
+        all_new_samples = []
+        for idx, k in enumerate(self.keys):
+            all_sample = [anno[k] for anno in targets]
+            # if len(all_sample[0].shape) == 2: shape = [len(targets), each_max[idx], all_sample[0].shape[-1]]
+            if len(all_sample[0].shape) > 1:
+                shape = [len(targets), each_max[idx]]
+                shape.extend(list(all_sample[0].shape[1:]))
+            else: shape = [len(targets), each_max[idx]]
+            
+            copied = targets[0][k].new_full(shape, 0)
+            for d_idx, d in enumerate(all_sample):
+                size_diff = each_max[idx] - d.shape[0]
+                
+                
+                if size_diff == 0: copied[d_idx].copy_(d)
+                else:
+                    if len(d.shape) == 1: copied[d_idx, :d.shape[0]].copy_(d)
+                    elif len(d.shape) == 2: copied[d_idx, :d.shape[0], :d.shape[1]].copy_(d)
+            all_new_samples.append(copied)
+            
+        return batched_imgs, all_new_samples
+    
+    def recover_all_batches_targets(self, images, targets, start, end):
+        batch_lists = []
+        for idx, shapes in enumerate(self.save_origin_size[start:end]):
+            if shapes[-2:] == images[idx].shape[-2:]:
+                batch_lists.append(images[idx].clone())
+                assert torch.equal(images[idx], batch_lists[idx])
+                
+            else:
+                new_sample = tv_F.crop(images[idx], 0, 0, shapes[-2], shapes[-1])
+                batch_lists.append(new_sample)
+                assert torch.equal(images[idx, :, :shapes[-2], :shapes[-1]], batch_lists[idx])
+                    
+        
+        
+        anno = [{} for _ in range(end-start)]
+        for i, key in enumerate(self.keys):
+            for j, (batch_data, shape) in enumerate(zip(targets[i], self.origin_size[start:end])):
+                if shape[key][0] == batch_data.shape[0]: anno[j][key] = batch_data
+                else:
+                    origin_data = batch_data[:shape[key][0]]
+                    anno[j][key] = origin_data
+        
+        return batch_lists, anno
+    
+    
+    def match_all_batches(self, images: List[Tensor]):
+        self.save_origin_size = [list(img.shape) for img in images]
+        
+        max_size = self.max_by_axis(self.save_origin_size)
+        batch_shape = [len(images)] + max_size
+        batched_imgs = images[0].new_full(batch_shape, 0)
+        
+        for idx, img in enumerate(images):
+            if img.shape[-2:] == max_size[-2:]: batched_imgs[idx,:,:,:].copy_(img)
+            else: batched_imgs[idx] = tv_F.crop(img, 0, 0, max_size[-2], max_size[-1])
+            assert torch.equal(img, batched_imgs[idx, :, :img.shape[-2], :img.shape[-1]])
             
         return batched_imgs
-        
-        
+    
+    
     def recover_all_batches(self, images, start, end):
-        batches_shape = self.save_origin_size[start:end]
-        # print(batches_shape)
-        
         batch_lists = []
-        for idx, shapes in enumerate(batches_shape):
-            if shapes == images[idx].shape[-2:]: continue
-            # print(shapes)
-            new_sample = tv_F.crop(images[idx], 0, 0, shapes[-2], shapes[-1])
-            # print(new_sample.size())
-            batch_lists.append(new_sample)
-            
+        for idx, shapes in enumerate(self.save_origin_size[start:end]):
+            if shapes[-2:] == images[idx].shape[-2:]:
+                batch_lists.append(images[idx])
+                assert torch.equal(images[idx], batch_lists[idx])
+                
+            else:
+                new_sample = tv_F.crop(images[idx], 0, 0, shapes[-2], shapes[-1])
+                batch_lists.append(new_sample)
+                assert torch.equal(images[idx, :, :shapes[-2], :shapes[-1]], batch_lists[idx])
+                
         return batch_lists
     
+    
+    def prediction_to_tensor(self, predictions, max_padding_size=50):
+        self.output_keys = list(predictions[0].keys())
         
+        
+        
+    
+    
+    
+    
     
     def batch_images(self, images: List[Tensor], size_divisible: int = 32) -> Tensor:
         if torchvision._is_tracing():
@@ -261,7 +346,6 @@ class GeneralizedRCNNTransform(nn.Module):
         max_size[1] = int(math.ceil(float(max_size[1]) / stride) * stride)
         max_size[2] = int(math.ceil(float(max_size[2]) / stride) * stride)
 
-        
         batch_shape = [len(images)] + max_size
         batched_imgs = images[0].new_full(batch_shape, 0)
         for i in range(batched_imgs.shape[0]):
@@ -276,8 +360,8 @@ class GeneralizedRCNNTransform(nn.Module):
                     image_shapes: List[Tuple[int, int]],
                     original_image_sizes: List[Tuple[int, int]]
                     ) -> List[Dict[str, Tensor]]:
-        if self.training:
-            return result
+        # if self.training:
+        #     return result
         for i, (pred, im_s, o_im_s) in enumerate(zip(result, image_shapes, original_image_sizes)):
             boxes = pred["boxes"]
             boxes = resize_boxes(boxes, im_s, o_im_s)

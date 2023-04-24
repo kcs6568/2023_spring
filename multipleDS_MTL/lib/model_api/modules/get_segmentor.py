@@ -48,13 +48,16 @@ class SegStem(nn.Module):
 
 
 class FCNHead(nn.Module):
-    def __init__(self, in_channels=2048, inter_channels=None, 
-                 num_classes=21, use_aux=True, aux_channel=None, num_skip_aux=1,
+    def __init__(self, in_channels=2048, inter_channels=None, aux_ratio=0.5,
+                 num_classes=21, use_aux=True, aux_channel=None, num_skip_aux=1, dropout_ratio=0.1,
                  activation_function=nn.ReLU(inplace=True)) -> None:
         super(FCNHead, self).__init__()
         inter_channels = in_channels // 4 if inter_channels is None else inter_channels
+        self.dropout_ratio = dropout_ratio
         self.fcn_head = self._make_fcn_head(in_channels, inter_channels, num_classes, activation_function)
         self.interplation = nn.Upsample()
+        self.aux_ratio = float(aux_ratio)
+        
         if use_aux:
             '''
             get aux feature at the specific location (if this value is 1, the popitem() operation will be operated once)
@@ -74,7 +77,7 @@ class FCNHead(nn.Module):
             nn.Conv2d(in_channels, inter_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(inter_channels),
             activation,
-            nn.Dropout(0.1),
+            nn.Dropout(self.dropout_ratio),
             nn.Conv2d(inter_channels, num_classes, 1)
         ]
         
@@ -86,9 +89,10 @@ class FCNHead(nn.Module):
         
         for name, x in inputs.items():
             losses[name] = F.cross_entropy(x, target, ignore_index=255)
+            if 'aux' in name: losses[name] *= self.aux_ratio
         
-        if "seg_aux_loss" in losses:
-            losses["seg_aux_loss"] *= 0.5
+        # if "seg_aux_loss" in losses:
+        #     losses["seg_aux_loss"] *= self.aux_ratio
          
         return losses
         
@@ -102,14 +106,13 @@ class FCNHead(nn.Module):
         x = nn.Upsample(size=input_shape, mode='bilinear', align_corners=False)(x)
         results["seg_out_loss"] = x
         
-        if self.aux_head is not None:
-            for _ in range(self.num_skip_aux):
-                _, x = feats.popitem()
-            x = self.aux_head(x)
-            x = nn.Upsample(size=input_shape, mode='bilinear', align_corners=False)(x)
-            results["seg_aux_loss"] = x
-        
         if self.training:
+            if self.aux_head is not None:
+                for _ in range(self.num_skip_aux):
+                    _, x = feats.popitem()
+                x = self.aux_head(x)
+                x = nn.Upsample(size=input_shape, mode='bilinear', align_corners=False)(x)
+                results["seg_aux_loss"] = x
             return self.criterion(results, target)
 
         else:

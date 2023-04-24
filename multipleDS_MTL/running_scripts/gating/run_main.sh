@@ -36,4 +36,13 @@ BACKBONE=$5
 
 
 
-./run_three.sh 29500 baseline 3 4 resnet50
+# ./run_three.sh 6000 baseline 7 4 resnet50
+
+cnt=0
+while (( "${cnt}" < 2 )); do
+    ./run_three.sh 29500 3 4 resnet50 gating baseline SP002
+    ./run_three_retrain.sh 29500 3 4 resnet50 gating baseline SP002
+    # ./run_three.sh 6060 baseline 6 3 resnet50
+    # echo "${cnt}"
+    (( cnt = "${cnt}" + 1 ))
+done
