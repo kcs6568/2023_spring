@@ -11,6 +11,7 @@ class ClfHead(nn.Module):
                  num_classes,
                  middle_channle=None,
                  use_avgpool=True,
+                 stem_weight=None,
                  **kwargs) -> None:
         super().__init__()
         self.avg = nn.AdaptiveAvgPool2d((1,1)) if use_avgpool else None
@@ -27,6 +28,11 @@ class ClfHead(nn.Module):
         
         else:
             raise ValueError
+        
+        if stem_weight is not None:
+            ckpt = torch.load(stem_weight, map_location='cpu')
+            self.load_state_dict(ckpt)
+            print("!!!Load weights for classification stem layer!!!")
         
         self.criterion = nn.CrossEntropyLoss()
 

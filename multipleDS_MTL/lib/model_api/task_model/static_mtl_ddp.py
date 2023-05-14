@@ -163,37 +163,23 @@ class DDPStatic(nn.Module):
                 self.task_single_network[d].encoder.parameters()):
                 target.grad = base.grad
     
-    
-    # def compute_newgrads(self, 
-    #                      origin_grad, 
-    #                      cur_iter=None,
-    #                      total_mean_grad=False):
-    #     if self.grad_method.require_copied_grad: copied_task_grad2vec = {k: origin_grad[k].clone().to(get_rank()) for k in self.datasets}
-    #     else: copied_task_grad2vec = None
-    #     self.grad_zero_shared_encoder
-       
-    #     kwargs = {'iter': cur_iter}
-    #     new_grads = self.grad_method.backward(origin_grad, copied_task_grad2vec, **kwargs)
-        
-    #     if total_mean_grad: self._reset_grad(new_grads/len(origin_grad))
-    #     else: self._reset_grad(new_grads)
-        
-    #     self._transfer_computed_grad()
 
-    
-    
-    def compute_newgrads(self, origin_grad=None, cur_iter=None, total_mean_grad=False):
+    def compute_newgrads(self, origin_grad=None, cur_iter=None,
+                         total_mean_grad=False):
         if origin_grad is None:
             origin_grad = {k: self._grad2vec(k) for k in self.datasets}
             
         assert origin_grad is not None
-                
-        if self.grad_method.require_copied_grad: copied_task_grad2vec = {k: origin_grad[k].clone().to(get_rank()) for k in self.datasets}
-        else: copied_task_grad2vec = None
-        self.grad_zero_shared_encoder 
         
-        kwargs = {'iter': cur_iter}
-        new_grads = self.grad_method.backward(origin_grad, copied_task_grad2vec, **kwargs)
+        if self.grad_method.apply_method:
+            if self.grad_method.require_copied_grad: copied_task_grad2vec = {k: origin_grad[k].clone().to(get_rank()) for k in self.datasets}
+            else: copied_task_grad2vec = None
+            self.grad_zero_shared_encoder 
+            
+            kwargs = {'iter': cur_iter}
+            new_grads = self.grad_method.backward(origin_grad, copied_task_grad2vec, **kwargs)
+        else:
+            new_grads = sum(grad for grad in origin_grad.values())
         
         dist.all_reduce(new_grads)
         new_grads /= dist.get_world_size()
@@ -204,15 +190,6 @@ class DDPStatic(nn.Module):
         self._transfer_computed_grad()
     
     
-    # def after_iters(self):
-    #     avg_norm = {k: 0. for k in self.datasets}
-    #     for k, grad in self.iter_grad.items(): avg_norm[k] = torch.stack(grad).mean()
-    #     self.grad_method.weighting_method.save_loss_to_buffer(avg_norm)
-        
-    #     self.grad_method.weighting_method.set_epoch
-    #     for d in self.datasets: self.iter_grad[d] = []
-        
-        
     def forward(self, data_dict, kwargs):
         if self.training:
             output = self.task_single_network[kwargs['dataset']](data_dict)

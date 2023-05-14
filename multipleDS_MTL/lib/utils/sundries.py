@@ -95,7 +95,7 @@ def set_args(args):
         num_task = "quintuple"
     
     if 'gating' in args.approach:
-        if args.retrain_phase:
+        if args.baseline_args['retrain_phase']:
             if args.approach == 'gating_ddp':
                 args.approach = 'gating'
                 for k, v in args.task_balancing.items(): args.task_balancing[k] = None
@@ -106,8 +106,8 @@ def set_args(args):
         args.output_dir = os.path.join(
             args.output_dir, args.model, num_task, args.dataset)
         
-        if torch.cuda.device_count() == 1:
-            args.output_dir = os.path.join(args.output_dir, "single_GPU")
+        # if torch.cuda.device_count() == 1:
+        #     args.output_dir = os.path.join(args.output_dir, "single_GPU")
             
         args.output_dir = os.path.join(
             args.output_dir, args.approach, args.method)

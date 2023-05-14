@@ -116,7 +116,8 @@ def training(model, optimizer, data_loaders,
         logger.log_text("No Warmup Training")
     
     if not module.retrain_phase:
-        logger.log_text(f"Current Sparsity Weight: {args.baseline_args['gate_args']['sparsity_weight']}")
+        logger.log_text(f"Current Sparsity Weight: {args.baseline_args['gate_args']['lambda_sparsity']}")
+        logger.log_text(f"Different Block Weighting: {args.baseline_args['sparsity_weighting'].upper()}\n({module.sparsity_weight})")
     
     weighting_method = None if module.weighting_method is None else module.weighting_method
     grad_method = None if module.grad_method is None else module.grad_method
@@ -128,20 +129,14 @@ def training(model, optimizer, data_loaders,
         loss_calculator = LossCalculator(
             'general', args.task_per_dset, args.loss_ratio, weighting_method=weighting_method)
         
-    start_time = time.time()
-    end = time.time()
     
     other_args = {"task_list": args.task_per_dset, "current_epoch": epoch}
     loss_for_save = None
     
     all_iter_losses = []
-    if args.grad_clip_value is not None:
-        clip_value = torch.tensor(args.grad_clip_value, dtype=torch.float)
-        min_grad = torch.neg(clip_value) if clip_value > 0 else clip_value
-        max_grad = clip_value if clip_value > 0 else torch.neg(clip_value)
     
-    # wm = None
-    
+    start_time = time.time()
+    end = time.time()
     for i, b_data in enumerate(biggest_dl):
         input_dicts.clear()
         input_dicts[biggest_datasets] = b_data
@@ -212,7 +207,7 @@ def training(model, optimizer, data_loaders,
             scaler.update()
         
         else:
-            losses.backward(retain_graph=False)
+            losses.backward()
             if args.grad_clip_value is not None:
                 torch.nn.utils.clip_grad_norm_(
                     model.parameters(),
@@ -244,13 +239,17 @@ def training(model, optimizer, data_loaders,
                 logger,
                 i
             )
+            
             if not model.module.retrain_phase:
-                logger.log_text(f"Intermediate Gate Logits (up: use / down: no use)")
-                for dset in datasets: logger.log_text(f"{dset}:\n{torch.transpose(model.module.task_gating_params[dset].data.clone().detach(), 0, 1)}")
+                logger.log_text(f"Intermediate Gate Logits (up: use / down: no use)\n{str(model.module)}")
+                
                 logger.log_text(f"Temperature: {model.module.decay_function.temperature}\n")
                 
             if weighting_method is not None:
                 logger.log_text(f"{weighting_method.name}_Params: {str(weighting_method)}")
+            
+            logger.log_text(
+                f"Middle Processing Time: {str(datetime.timedelta(seconds=int(time.time() - start_time)))}")
             
         if tb_logger:
             tb_logger.update_scalars(loss_dict_reduced, i)   
@@ -455,14 +454,18 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         metric_logger.set_before_train(header)
         
         mac_count = 0.
+        batch_size = 0
         
         total_start_time = time.time()
         for i, data in enumerate(taskloader):
             batch_set = {dataset: data}
+            
             '''
             batch_set: images(torch.cuda.tensor), targets(torch.cuda.tensor)
             '''
             task_data = metric_utils.preprocess_data(batch_set, data_cats)
+            
+            if i == 0: batch_size = len(batch_set[dataset])
             # imgs, labels = task_data[dataset][0], task_data[dataset][1]
             
             iter_start_time = time.time()
@@ -488,6 +491,8 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
                     i
                 )
                 
+                logger.log_text(str(model.module))
+                
             if BREAK and i == 2:
                 print("BREAK!!!")
                 break
@@ -505,7 +510,7 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         logger.log_text(f"{dataset.upper()} Averaged Evaluation Time: {avg_time_str}")
         task_avg_time.update({dataset: avg_time_str})
         
-        mac_count = torch.tensor(mac_count).cuda()
+        mac_count = torch.tensor(mac_count/batch_size).cuda()
         dist.all_reduce(mac_count)
         logger.log_text(f"All reduced MAC:{round(float(mac_count)*1e-9, 2)}")
         averaged_mac = mac_count/((i+1) * get_world_size())

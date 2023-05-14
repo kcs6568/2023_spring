@@ -9,10 +9,7 @@ BACKBONE=$5
 
 cnt=0
 while (( "${cnt}" < 2 )); do
-    ./run_three.sh 29500 3 4 resnet50 static pcgrad sepGrad_kaimNorm_Clip1_gradReduce
-    # ./run_three2.sh 29500 3 4 resnet50 static pcgrad sepGrad_kaimNorm_eachClip1_UWneg1
-    # ./run_three3.sh 29500 3 4 resnet50 static pcgrad sepGrad_kaimNorm_eachClip1_UWpos2
-    # ./run_three4.sh 29500 3 4 resnet50 static pcgrad sepGrad_kaimNorm_eachClip1_DWA
+    ./run_three.sh 29500 3 4 resnet50 static baseline w1000_FFT_leakyRelu_2
     (( cnt = "${cnt}" + 1 ))
 done
 

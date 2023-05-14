@@ -20,9 +20,9 @@ class SegStem(nn.Module):
         self.bn = nn.BatchNorm2d(out_channels)
         
         if stem_weight is not None:
-            print("!!!Load weights for segmentation stem layer!!!")
-            ckpt = torch.load("/root/volume/pretrained_weights/resnet50_IM1K_dense_stem.pth")
+            ckpt = torch.load(stem_weight, map_location='cpu')
             self.load_state_dict(ckpt)
+            print("!!!Load weights for segmentation stem layer!!!")
         
         self.activation = activation_function
             

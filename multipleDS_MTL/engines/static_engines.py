@@ -166,43 +166,10 @@ def training(model, optimizer, data_loaders,
         grad_dict = {}
         weighted_loss = 0
         with torch.cuda.amp.autocast(enabled=scaler is not None):
-            for ti, dset in enumerate(datasets):
-                module.encoder.zero_grad()
-                task_loss = module({dset: input_set[dset]},
-                                   {'task_list': {dset: args.task_per_dset[dset]}})
+            other_args.update({'cur_iter': i})
+            loss_dict = model(input_set, other_args)
                 
-                loss_dict.update(task_loss)
-                if weighting_method is not None:
-                    loss, logging_dict = loss_calculator.loss_calculator(task_loss)
-                    weighted_loss += loss
-                    loss_dict.update(logging_dict)
-                    
-                else:
-                    loss = sum(l for l in task_loss.values())
-                    
-                model.reducer.prepare_for_backward(loss)
-                loss.backward()
-                
-                if args.grad_clip_value is not None:
-                    if 'coco' in dset:
-                        params = [p for n, p in model.named_parameters() if p.requires_grad if 'encoder' in n if dset in n if 'fpn' in n]
-                    else:
-                        params = [p for n, p in model.named_parameters() if p.requires_grad if 'encoder' in n if dset in n]
-                    
-                    torch.nn.utils.clip_grad_norm_( # clip gradient values to maximum 1.0
-                        # [p for n, p in model.named_parameters() if p.requires_grad if 'encoder' in n],
-                        params,
-                        args.grad_clip_value)
-                
-                grad_dict[dset] = module.grad2vec(clone_grad=True)
-                dist.all_reduce(grad_dict[dset])
-                grad_dict[dset] /= dist.get_world_size()
-                
-                
-        if weighted_loss != 0:
-            losses = weighted_loss
-        else:
-            losses, logging_dict = loss_calculator.loss_calculator(loss_dict)                
+        losses, logging_dict = loss_calculator.loss_calculator(loss_dict)
             
         loss_dict_reduced = metric_utils.reduce_dict(loss_dict, average=False)
         losses_reduced = sum(loss for loss in loss_dict_reduced.values())
@@ -230,17 +197,7 @@ def training(model, optimizer, data_loaders,
             
         else:
             optimizer.zero_grad(set_to_none=args.grad_to_none)
-            if grad_method is None:
-                losses.backward()
-                
-                if args.grad_clip_value is not None:
-                    torch.nn.utils.clip_grad_norm_( # clip gradient values to maximum 1.0
-                            [p for p in model.parameters() if p.requires_grad], args.grad_clip_value)
-            
-            else:
-                module.compute_newgrads(
-                    grad_dict, cur_iter=i, total_mean_grad=args.total_mean_grad)
-                    
+            losses.backward()
             optimizer.step()
         
         
@@ -464,6 +421,7 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         mac_count = 0.
         total_eval_time = 0
         
+        batch_size = 0
         
         total_start_time = time.time()
         for i, data in enumerate(taskloader):
@@ -473,6 +431,7 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
             '''
             batch_set = metric_utils.preprocess_data(batch_set, data_cats)
 
+            if i == 0: batch_size = len(batch_set[dataset])
 
             iter_start_time = time.time()
             macs, _, outputs = get_model_complexity_info(
@@ -508,6 +467,7 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
             #     break
             
             torch.cuda.synchronize()
+        
         total_end_time = time.time() - total_start_time
         
         all_time_str = str(datetime.timedelta(seconds=int(total_end_time)))
@@ -520,7 +480,7 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         logger.log_text(f"{dataset.upper()} Averaged Evaluation Time: {avg_time_str}")
         task_avg_time.update({dataset: avg_time_str})
         
-        mac_count = torch.tensor(mac_count).cuda()
+        mac_count = torch.tensor(mac_count/batch_size).cuda()
         dist.all_reduce(mac_count)
         logger.log_text(f"All reduced MAC:{round(float(mac_count)*1e-9, 2)}")
         averaged_mac = mac_count/((i+1) * get_world_size())

@@ -56,6 +56,22 @@ class GateMTL(nn.Module):
             backbone_network.body.load_state_dict(backbone_weight, strict=True)
             print("!!!Loaded pretrained body weights!!!")
         
+        init_type = kwargs['init_type'] if 'init_type' in kwargs else None
+        init_dist = kwargs['init_dist'] if 'init_dist' in kwargs else None
+        init_function = None
+        # if init_type is not None and init_dist is not None:
+        #     if kwargs['init_type'] == 'kaiming':
+        #         if kwargs['init_dist'] == 'uniform':
+        #             init_function = init_kaiming_uniform
+        #         elif kwargs['init_dist'] == 'normal':
+        #             init_function = init_kaiming_normal
+                    
+        #     elif kwargs['init_type'] == 'xavier':
+        #         if kwargs['init_dist'] == 'uniform':
+        #             init_function = init_xavier_uniform
+        #         elif kwargs['init_dist'] == 'normal':
+        #             init_function = init_xavier_normal
+        
         self.num_per_block = []
         blocks = []
         ds = []
@@ -77,12 +93,10 @@ class GateMTL(nn.Module):
             'ds': nn.ModuleList(ds)
         })
         
-        # self.blocks = nn.ModuleList(self.blocks)
-        # self.ds = nn.ModuleList(self.ds)
-        self.fpn = backbone_network.fpn
+        # self.fpn = backbone_network.fpn
         
-        self.stem_dict = nn.ModuleDict()
-        self.head_dict = nn.ModuleDict()
+        self.stem = nn.ModuleDict()
+        self.head = nn.ModuleDict()
         
         self.return_layers = {}
         data_list = []
@@ -101,6 +115,7 @@ class GateMTL(nn.Module):
             'activation_function': kwargs['activation_function']
         }
         
+        use_fpn = True if kwargs['use_fpn'] else False
         for data, cfg in task_cfg.items():
             data_list.append(data)
             self.return_layers.update({data: cfg['return_layers']})
@@ -124,9 +139,12 @@ class GateMTL(nn.Module):
                 stem = ClfStem(**stem_cfg)
                 head = build_classifier(
                     backbone, num_classes, head_cfg)
-                stem.apply(init_weights)
+                
+                if init_function is not None: stem.apply(init_weights)
+                
                 
             elif task == 'det':
+                stem_cfg['stem_weight'] = kwargs['stem_weight']
                 stem = DetStem(**stem_cfg)
                 
                 head_cfg.update({'num_anchors': len(backbone_network.body.return_layers)+1})
@@ -140,19 +158,20 @@ class GateMTL(nn.Module):
                 #     backbone, detector, 
                 #     backbone_network.fpn_out_channels, num_classes, **head_cfg)
                 
-                # if backbone_network.fpn is not None:
-                #     head = nn.ModuleDict({
-                #         'fpn': backbone_network.fpn,
-                #         'detector': detection
-                #     })
+                if init_function is not None: backbone_network.fpn.apply(init_function)
+                head = nn.ModuleDict({
+                    'fpn': backbone_network.fpn,
+                    'detector': head
+                })
             
             elif task == 'seg':
+                stem_cfg['stem_weight'] = kwargs['stem_weight']
                 stem = SegStem(**stem_cfg)
                 head = build_segmentor(segmentor, num_classes=num_classes, cfg_dict=head_cfg)
             
-            head.apply(init_weights)
-            self.stem_dict.update({data: stem})
-            self.head_dict.update({data: head})
+            # head.apply(init_weights)
+            self.stem.update({data: stem})
+            self.head.update({data: head})
         
         if 'static_weight' in kwargs:
             static_weight = torch.load(kwargs['static_weight'], map_location="cpu")['model']
@@ -168,18 +187,31 @@ class GateMTL(nn.Module):
             wm_param = kwargs['weight_method']
             w_type = wm_param.pop('type')
             self.weighting_method = define_weighting_method(w_type)
-            if wm_param['init_param']: self.weighting_method.init_params(data_list, **wm_param)
+            self.weighting_method.init_params(data_list, **wm_param)
         else: self.weighting_method = None
         
         if 'grad_method' in kwargs and kwargs['grad_method'] is not None:
             gm_param = kwargs['grad_method']
             g_type = gm_param.pop('type')
             self.grad_method = define_gradient_method(g_type)
-            if gm_param['init_param']: self.grad_method.init_params(data_list, **gm_param)
+            self.grad_method.init_params(data_list, **gm_param)
             self.compute_grad_dim
         else: self.grad_method = None
         
+        self.retrain_phase = kwargs['retrain_phase']
+        self.activation_function = kwargs['activation_function']
         
+        if self.retrain_phase:
+            self.activation_function.inplace = False
+        
+        if kwargs['sparsity_weighting'] is None:
+            self.sparsity_weight = 1.0
+        elif kwargs['sparsity_weighting'] == 'ascending':
+            self.sparsity_weight = ((torch.arange(0, sum(self.num_per_block), 1) + 1).float() / sum(self.num_per_block)).cuda()
+        elif kwargs['sparsity_weighting'] == 'descending':
+            self.sparsity_weight = (torch.arange(sum(self.num_per_block), 0, -1).float() / sum(self.num_per_block)).cuda()
+            
+            
     @property
     def compute_grad_dim(self):
         self.grad_index = []
@@ -271,7 +303,7 @@ class GateMTL(nn.Module):
     
     def _make_gate(self, args):
         for k, v in args.items(): setattr(self, k ,v)
-        # self.sparsity_weight = gate_args['sparsity_weight']
+        
         logit_dict = {}
         get_grad = True
         for t_id in range(len(self.data_list)):
@@ -288,7 +320,7 @@ class GateMTL(nn.Module):
         stem_feats = OrderedDict()
         
         for dset, (images, _) in data_dict.items():
-            stem_feats.update({dset: self.stem_dict[dset](images)})
+            stem_feats.update({dset: self.stem[dset](images)})
         return stem_feats
     
     
@@ -336,8 +368,8 @@ class GateMTL(nn.Module):
                 for block_idx in range(num_blocks):
                     identity = (ds_module[layer_idx](feat) if block_idx == 0 else feat)
                     
-                    if layer_gate[block_count, 0]: feat = F.leaky_relu(block_module[layer_idx][block_idx](feat) + identity)
-                    else: feat = F.leaky_relu(identity)
+                    if layer_gate[block_count, 0]: feat = self.activation_function(block_module[layer_idx][block_idx](feat) + identity)
+                    else: feat = self.activation_function(identity)
                     block_count += 1
                     
                     
@@ -378,11 +410,11 @@ class GateMTL(nn.Module):
                    
                     if self.training:
                         block_output = block_module[layer_idx][block_idx](feat) + identity
-                        feat = F.leaky_relu((policies[dset][block_count, 0] * block_output) + (policies[dset][block_count, 1] * identity))
+                        feat = self.activation_function((policies[dset][block_count, 0] * block_output) + (policies[dset][block_count, 1] * identity))
                         
                     else:
-                        if policies[dset][block_count, 0]: feat = F.leaky_relu(block_module[layer_idx][block_idx](feat) + identity) 
-                        else: feat = F.leaky_relu(identity)
+                        if policies[dset][block_count, 0]: feat = self.activation_function(block_module[layer_idx][block_idx](feat) + identity) 
+                        else: feat = self.activation_function(identity)
                     
                     block_count += 1
                     
@@ -402,21 +434,21 @@ class GateMTL(nn.Module):
         total_losses = OrderedDict()
         for dset, back_feats in backbone_feats.items():
             task = other_hyp["task_list"][dset]
-            head = self.head_dict[dset]
+            head = self.head[dset]
             targets = data_dict[dset][1]
             
             if task == 'clf':
                 losses = head(back_feats, targets)
                 
             elif task == 'det':
-                fpn_feat = self.fpn(back_feats)
-                losses = head(data_dict[dset][0], fpn_feat,
-                                        self.stem_dict[dset].transform, 
+                fpn_feat = head['fpn'](back_feats)
+                losses = head['detector'](data_dict[dset][0], fpn_feat,
+                                        self.stem[dset].transform, 
                                     origin_targets=targets)
                 
                 # fpn_feat = head['fpn'](back_feats)
                 # losses = head['detector'](data_dict[dset][0], fpn_feat,
-                #                         self.stem_dict[dset].transform, 
+                #                         self.stem[dset].transform, 
                 #                     origin_targets=targets)
                 
             elif task == 'seg':
@@ -431,6 +463,7 @@ class GateMTL(nn.Module):
             disjointed_loss = disjointed_policy_loss(
                     self.task_gating_params, 
                     sum(self.num_per_block),
+                    self.lambda_sparsity,
                     sparsity_weight=self.sparsity_weight, 
                     smoothing_alpha=self.label_smoothing_alpha,
                     return_sum=self.return_sum)
@@ -438,9 +471,9 @@ class GateMTL(nn.Module):
             if hasattr(self, 'only_gate_train'):
                 if self.only_gate_train:
                     if isinstance(disjointed_loss, dict): total_losses.update(disjointed_loss)
-                    else: total_losses.update({"sparsity": disjointed_loss})
+                    else: total_losses.update(disjointed_loss)
             # else: total_losses.update({"sparsity": disjointed_loss * self.sparsity_weight})
-            else: total_losses.update({"sparsity": disjointed_loss})
+            else: total_losses.update(disjointed_loss)
             
         return total_losses
     
@@ -448,16 +481,16 @@ class GateMTL(nn.Module):
     def _forward_val(self, data_dict, backbone_feats, other_hyp):
         dset = list(other_hyp["task_list"].keys())[0]
         task = list(other_hyp["task_list"].values())[0]
-        head = self.head_dict[dset]
+        head = self.head[dset]
         
         back_feats = backbone_feats[dset]
                 
         if task == 'det':
-            fpn_feat = self.fpn(back_feats)
-            predictions = head(data_dict[dset][0], fpn_feat, self.stem_dict[dset].transform)
+            fpn_feat = head['fpn'](back_feats)
+            predictions = head['detector'](data_dict[dset][0], fpn_feat, self.stem[dset].transform)
             
             # fpn_feat = head['fpn'](back_feats)
-            # predictions = head['detector'](data_dict[dset][0], fpn_feat, self.stem_dict[dset].transform)
+            # predictions = head['detector'](data_dict[dset][0], fpn_feat, self.stem[dset].transform)
             
         else:
             if task == 'seg':
@@ -475,7 +508,7 @@ class GateMTL(nn.Module):
         # if self.training:
         #     for dset, back_feats in backbone_feats.items():
         #         task = other_hyp["task_list"][dset]
-        #         head = self.head_dict[dset]
+        #         head = self.head[dset]
                 
         #         targets = data_dict[dset][1]
                 
@@ -485,7 +518,7 @@ class GateMTL(nn.Module):
         #         elif task == 'det':
         #             fpn_feat = head['fpn'](back_feats)
         #             losses = head['detector'](data_dict[dset][0], fpn_feat,
-        #                                     self.stem_dict[dset].transform, 
+        #                                     self.stem[dset].transform, 
         #                                 origin_targets=targets)
                     
         #         elif task == 'seg':
@@ -520,13 +553,13 @@ class GateMTL(nn.Module):
         # else:
         #     dset = list(other_hyp["task_list"].keys())[0]
         #     task = list(other_hyp["task_list"].values())[0]
-        #     head = self.head_dict[dset]
+        #     head = self.head[dset]
             
         #     back_feats = backbone_feats[dset]
                     
         #     if task == 'det':
         #         fpn_feat = head['fpn'](back_feats)
-        #         predictions = head['detector'](data_dict[dset][0], fpn_feat, self.stem_dict[dset].transform)
+        #         predictions = head['detector'](data_dict[dset][0], fpn_feat, self.stem[dset].transform)
                 
         #     else:
         #         if task == 'seg':

@@ -35,9 +35,14 @@ def build_model(args):
             if learning_approach == 'static':
                 from .task_model.static_mtl import StaticMTL as Model
                 
-            elif learning_approach == 'gating' or 'retrain' in learning_approach:
+            # elif learning_approach == 'gating' or 'retrain' in learning_approach:
+            elif 'gating' in learning_approach or 'retrain' in learning_approach:
                 model_args['decay_settings']['max_iter'] = max(args.ds_size)
-                from .task_model.gating import GateMTL as Model
+                
+                if 'custom' in learning_approach:
+                    from .task_model.gating_custom import CustomGating as Model
+                else:
+                    from .task_model.gating import GateMTL as Model
                 
         else:
             if learning_approach == 'static_ddp':

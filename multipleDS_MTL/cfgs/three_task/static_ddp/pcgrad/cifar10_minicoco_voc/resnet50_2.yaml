@@ -1,6 +1,6 @@
 setup: 'multi_task'
-approach: 'static_ddp'
 method: 'pcgrad'
+approach: 'static_ddp'
 
 backbone: 'resnet50'
 detector: 'fasterrcnn'
@@ -9,8 +9,8 @@ segmentor: 'fcn'
 use_minids: True
 
 state_dict: 
-  stem: '/root/volume/pretrained_weights/resnet50_IM1K_dense_stem.pth'
-  backbone: '/root/volume/pretrained_weights/resnet50_IM1K_body.pth'
+  stem: /root/volume/23_spring/mdmtl/pretrained_weights/resnet50_IM1K_dense_stem.pth
+  backbone: /root/volume/23_spring/mdmtl/pretrained_weights/resnet50_IM1K_body.pth
   # stem: null
   # backbone: null
 
@@ -49,6 +49,7 @@ task_cfg:
       stride: 2
       padding: 3
     head:
+      # dropout_ratio: 0.3
       in_channels: 2048
       use_aux: True
     return_layers: ['2', '3']
@@ -58,9 +59,10 @@ task_bs:
   - 2
   - 2
 
-lr_config:
-  type: exp
-  gamma: 0.85
+# weight_decay: 0.01
+
+lr_config: 
+  type: cosine
 
 baseline_args:
   is_hardsampling: False
@@ -69,13 +71,8 @@ baseline_args:
   freeze_bn: True
   train_allbackbone: True
   freeze_backbone: False
-  relu_type: null
-  freeze_stem: False
   bottleneck_type: default
-  weight_method: null
   base_dataset: cifar10
-  init_type: kaiming
-  init_dist: normal
 activation_function: leakyrelu
 
 total_mean_grad: True
@@ -83,10 +80,13 @@ task_balancing:
   grad_method:
     type: pcgrad
     require_copied_grad: True
-  weight_method: null
-    # type: uw
-    # init_param: True
-    # init_value: -1.0
+    alter_step: [0, 1, 4, 5, 8, 9]
+  weight_method:
+    type: dwa
+    init_param: True
+    total_epoch: 12
+    temperature: 2.0
+    alter_step: [2, 3, 6, 7, 10, 11]
 
 loss_ratio: null
 epochs: 12

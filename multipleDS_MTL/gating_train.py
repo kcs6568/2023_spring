@@ -73,6 +73,7 @@ def main(args):
     if args.resume:
         logger.log_text("{}\n\t\t\tResume training\n{}".format("###"*40, "###"*45))
     logger.log_text(f"Experiment Case: {args.exp_case}")
+    logger.log_text(f"Output Path: {args.output_dir}")
     
     tb_logger = None
     if args.distributed and get_rank() == 0:
@@ -115,19 +116,12 @@ def main(args):
     
     model = build_model(args)
     
-    if args.retrain_phase:
-        setattr(model, 'retrain_phase', True)
+    if model.retrain_phase:
         retrain_args = args.retrain_args
         args.epochs = retrain_args['epoch']
         
-        # if args.lr_scheduler == 'multi':
-        #     assert max(retrain_args['scheduler_step']) < retrain_args['epoch']
-        #     args.lr_steps = retrain_args['scheduler_step']
-        # elif args.lr_scheduler == 'step':
-        #     args.step_size = retrain_args['step_size']
-            
-        if 'gate_opt' in args or 'gate_opt' is not None:
-            args.gate_opt = None
+        # if 'gate_opt' in args or 'gate_opt' is not None:
+        #     args.gate_opt = None
         
         if retrain_args['gated_weight'] == 'mine':
             gating_path = os.path.join(args.output_dir, 'ckpts', f"checkpoint.pth")
@@ -145,7 +139,7 @@ def main(args):
         else:
             model.load_state_dict(gated_weight['model'], strict=False)
         model.fix_gate()
-        logger.log_text(str(model))
+        logger.log_text(model.print_fixed_gate_info())
         
         gated_block_p, ds_param, total_param = model.compute_subnetwork_size()
         
@@ -157,9 +151,6 @@ def main(args):
             lines += f" {round(sump*(1e-6) + sum_ds*(1e-6), 3)}M/{round(sum_total*(1e-6), 3)}M"
             logger.log_text(lines)
     
-    else: 
-        setattr(model, 'retrain_phase', False)
-        
     if args.only_gate_train:
         learnable_params = ['gating', 'weighting']
         for n, p in model.named_parameters():
@@ -170,7 +161,7 @@ def main(args):
         setattr(model, 'only_gate_train', args.only_gate_train)
     
     
-    if args.gate_opt is not None: optimizer = get_optimizer_for_gating(args, model)
+    if 'gate_opt' in args: optimizer = get_optimizer_for_gating(args, model)
     else: optimizer = get_optimizer(args, model)
     logger.log_text(f"Optimizer:\n{optimizer}")
     logger.log_text(f"Apply AMP: {args.amp}")

@@ -200,9 +200,17 @@ class PCGrad(AbsWeighting):
         self.epoch_count = {k: 0 for k in self.task_list}
         self.iter_surgery_count = {k: 0 for k in self.task_list}
         
+        self.use_alter_step = True if "alter_step" in params else False
+        if self.use_alter_step:
+            self.apply_method = True if self.epoch in self.alter_step else False
+        else: self.apply_method = True
         
     def after_iter(self):
         self.iter_surgery_count = {k: 0 for k in self.task_list}
+        self.epoch += 1
+        
+        if self.use_alter_step:
+            self.apply_method = True if self.epoch in self.alter_step else False
     
     
     # def set_epoch(self, epoch):

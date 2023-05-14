@@ -6,43 +6,20 @@ START_GPU=$3
 NUM_GPU=$4
 BACKBONE=$5
 
-# ./run_single.sh 6000 3 4 resnet50 minicoco_mtan
-
-# while :
-# do
-#     ./run_penta.sh 6000 3 4 resnet50 ucsmv
-#     sleep 30
-# done
-
-
-# while :
-# do
-#     ./run_penta.sh 6000 3 4 resnet50 ucsmv
-#     sleep 30
-# done
-
-
-# while :
-# do
-#     ./run_quad.sh 29500 mtan 3 4 resnet50
-#     sleep 50
-
-# done
-
-
-
-# cd ../gating_scripts
-# cd ./run_main2.sh
-
-
-
-# ./run_three.sh 6000 baseline 7 4 resnet50
+PORT=6000
+START_GPU=7
+NUM_GPU=1
 
 cnt=0
 while (( "${cnt}" < 2 )); do
-    ./run_three.sh 29500 3 4 resnet50 gating baseline SP002
-    ./run_three_retrain.sh 29500 3 4 resnet50 gating baseline SP002
-    # ./run_three.sh 6060 baseline 6 3 resnet50
-    # echo "${cnt}"
+    ./run_three.sh $PORT $START_GPU $NUM_GPU resnet50 gating baseline SW002_AscendingSW
+    # ./run_three_retrain.sh $PORT 7 1 resnet50 gating baseline SP002_clipG
+
+    # ./run_three.sh 29500 3 4 resnet50 gating custom SP002_clipG
+    # ./run_three_retrain.sh 29500 3 4 resnet50 gating custom SP002_clipG
+
+    # ./run_three2.sh 29500 3 4 resnet50 gating custom SP0005_GELU
+    # ./run_three_retrain2.sh 29500 3 4 resnet50 gating custom SP0005_GELU
+
     (( cnt = "${cnt}" + 1 ))
 done

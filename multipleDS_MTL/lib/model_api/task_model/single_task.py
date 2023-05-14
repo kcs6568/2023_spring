@@ -80,10 +80,10 @@ def init_xavier_normal(m):
 
 
 
-def make_stem(task, stem_cfg, backbone=None, stem_weight=None, init_func=init_kaiming_uniform):
+def make_stem(task, stem_cfg, backbone=None, stem_weight=None, init_func=None):
     if task == 'clf':
         stem = ClfStem(**stem_cfg)
-        stem.apply(init_func)
+        if init_func is not None: stem.apply(init_func)
     
     elif task == 'det':
         stem = DetStem(**stem_cfg)
@@ -103,7 +103,7 @@ def make_stem(task, stem_cfg, backbone=None, stem_weight=None, init_func=init_ka
     
     
 def make_head(task, backbone, num_classes, dense_task=None, fpn_channel=256, 
-              head_cfg=None, init_func=init_kaiming_uniform):
+              head_cfg=None, init_func=None):
     if task == 'clf':
         head = build_classifier(
             backbone, num_classes, head_cfg)
@@ -123,7 +123,7 @@ def make_head(task, backbone, num_classes, dense_task=None, fpn_channel=256,
         head = build_segmentor(
             dense_task, num_classes, cfg_dict=head_cfg)
     
-    head.apply(init_func)
+    if init_func is not None: head.apply(init_func)
     return head
 
 
@@ -178,17 +178,21 @@ class SingleTaskNetwork(nn.Module):
         stem_cfg.update({'activation_function': kwargs['activation_function']})
         head_cfg.update({'activation_function': kwargs['activation_function']})
         
-        if kwargs['init_type'] == 'kaiming':
-            if kwargs['init_dist'] == 'uniform':
-                init_function = init_kaiming_uniform
-            elif kwargs['init_dist'] == 'normal':
-                init_function = init_kaiming_normal
-                
-        elif kwargs['init_type'] == 'xavier':
-            if kwargs['init_dist'] == 'uniform':
-                init_function = init_xavier_uniform
-            elif kwargs['init_dist'] == 'normal':
-                init_function = init_xavier_normal
+        init_type = kwargs['init_type'] if 'init_type' in kwargs else None
+        init_dist = kwargs['init_dist'] if 'init_dist' in kwargs else None
+        init_function = None
+        if init_type is not None and init_dist is not None:
+            if kwargs['init_type'] == 'kaiming':
+                if kwargs['init_dist'] == 'uniform':
+                    init_function = init_kaiming_uniform
+                elif kwargs['init_dist'] == 'normal':
+                    init_function = init_kaiming_normal
+                    
+            elif kwargs['init_type'] == 'xavier':
+                if kwargs['init_dist'] == 'uniform':
+                    init_function = init_xavier_uniform
+                elif kwargs['init_dist'] == 'normal':
+                    init_function = init_xavier_normal
         
         dense_task_name = None
         use_fpn = False
@@ -213,7 +217,7 @@ class SingleTaskNetwork(nn.Module):
                               init_func=init_function)
         
         if use_fpn:
-            backbone_network.fpn.apply(init_function)
+            if init_function is not None: backbone_network.fpn.apply(init_function)
             self.head = nn.ModuleDict({
                 'fpn': backbone_network.fpn,
                 'detector': head

@@ -10,10 +10,16 @@ def select_scheduler(optimizer, lr_config, args):
     scheduler_type = lr_config['type']
     
     if scheduler_type  == "step":
-        main_sch = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_config['step_size'], gamma=lr_config['gamma'])
+        if not 'step_size' in lr_config: step_size = 1
+        if not 'gamma' in lr_config: gamma = 0.1 if not 'step_size' in lr_config else 0.8
+        
+        main_sch = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
         
     elif scheduler_type == "multi":
-        main_sch = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=lr_config['lr_steps'], gamma=lr_config['gamma'])
+        milestones = [8, 11] if not 'lr_steps' in lr_config else lr_config['lr_steps']
+        gamma = 0.1 if not 'gamma' in lr_config else lr_config['gamma']
+        
+        main_sch = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
         
     elif scheduler_type == "cosine":
         t_max = lr_config['T_max'] if 'T_max' in lr_config else args.epochs
@@ -49,8 +55,9 @@ def get_optimizer_for_gating(args, model):
     gate_opt = None
     
     gate_args = None
-    if 'gate_opt' in args or args.gate_opt is not None:
-        gate_args = args.gate_opt
+    if 'gate_opt' in args:
+        if args.gate_opt is not None:
+            gate_args = args.gate_opt
 
     if gate_args is not None:
         main_lr = args.lr
@@ -189,34 +196,5 @@ def get_scheduler(args, optimizer):
         main_sch = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=scheduler_seq, milestones=lr_config['milestones'])
     
     else: main_sch = select_scheduler(optimizer, lr_config, args)
-    
-    # if args.lr_scheduler == "step":
-    #     main_sch = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lr_config['step_size'], gamma=lr_config['gamma'])
-        
-    # elif args.lr_scheduler == "multi":
-    #     main_sch = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=lr_config['lr_steps'], gamma=lr_config['gamma'])
-        
-    # elif args.lr_scheduler == "cosine":
-    #     t_max = lr_config['T_max'] if 'T_max' in lr_config else args.epochs
-    #     eta_min = lr_config['eta_min'] if 'eta_min' in lr_config else 0
-    #     main_sch = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max, eta_min=eta_min)
-        
-    # elif args.lr_scheduler == "exp":
-    #     main_sch = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=lr_config['gamma'])
-        
-    # elif args.lr_scheduler == "cycle":
-    #     assert args.lr == lr_config['max_lr']
-    #     cycle_momentum = False if 'adam' in args.opt else True
-    #     main_sch = torch.optim.lr_scheduler.CyclicLR(
-    #         optimizer, 
-    #         base_lr=lr_config['base_lr'], max_lr=lr_config['max_lr'], 
-    #         step_size_up=lr_config['step_size_up'], step_size_down=lr_config['step_size_down'], 
-    #         mode=lr_config['mode'], cycle_momentum=cycle_momentum)
-    
-        
-    # else:
-    #     raise RuntimeError(
-    #         f"Invalid lr scheduler '{args.lr_scheduler}'. Only MultiStepLR and CosineAnnealingLR are supported."
-    #     )
     
     return main_sch

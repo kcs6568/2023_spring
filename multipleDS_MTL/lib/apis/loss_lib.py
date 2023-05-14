@@ -231,15 +231,9 @@ def non_shared_gate_loss(gate_logits, tasks):
     return non_sharing_loss
 
 
-def disjointed_policy_loss(gate_logits, num_blocks, sparsity_weight=1.0, smoothing_alpha=None, return_sum=True):
+def disjointed_prob_loss(gate_logits, num_blocks, sparsity_weight=1.0, smoothing_alpha=None, return_sum=True):
     loss = 0.
-    if smoothing_alpha is not None:
-        gt_ = torch.ones(num_blocks, 2).long().cuda()
-        gt_[:, 0] = 0
-        gt = torch.tensor([[l*(1-smoothing_alpha) + smoothing_alpha/len(oh) for l in oh] for i, oh in enumerate(gt_)]).float().cuda()
-        
-    else:
-        gt = torch.ones(num_blocks).long().cuda()    
+    gt = torch.zeros(num_blocks).long().cuda()    
         
     # for dset in tasks:
     #     loss += F.cross_entropy(gate_logits[dset], gt)
@@ -254,21 +248,67 @@ def disjointed_policy_loss(gate_logits, num_blocks, sparsity_weight=1.0, smoothi
     
     all_loss = []
     
-    if isinstance(gate_logits, nn.ParameterDict):
-        for logit in gate_logits.values():
-            loss = F.cross_entropy(logit, gt) * sparsity_weight
-            all_loss.append(loss)
-            
-        if return_sum: return sum(all_loss)
-        else: return {f"{k}_sparsity_loss": all_loss[i] for i, k in enumerate(gate_logits.keys())}
+    for prob_idx in range(len(gate_logits[0])):
+        loss = F.l1_loss(gate_logits[:, prob_idx], gt) * sparsity_weight
+        all_loss.append(loss)
         
-    else:
-        loss = F.cross_entropy(gate_logits, gt) * sparsity_weight
-        return loss
-        
-        
+    if return_sum: return sum(all_loss)
+    else: return {f"{k}_sparsity_loss": all_loss[i] for i, k in enumerate(gate_logits.keys())}
     
+    
+    # if isinstance(gate_logits, (nn.ParameterDict, dict)):
+    #     for prob in gate_logits.values():
+    #         loss = F.l1_loss(prob, gt) * sparsity_weight
+    #         all_loss.append(loss)
+            
+    #     if return_sum: return sum(all_loss)
+    #     else: return {f"{k}_sparsity_loss": all_loss[i] for i, k in enumerate(gate_logits.keys())}
+        
+    # else:
+    #     loss = F.cross_entropy(gate_logits, gt) * sparsity_weight
+    #     return loss
 
+
+
+def disjointed_policy_loss(gate_logits, num_blocks, lambda_sparsity,
+                           sparsity_weight=1.0, smoothing_alpha=None, return_sum=True):
+    loss = 0.
+    # if smoothing_alpha is not None:
+    #     gt_ = torch.ones(num_blocks, 2).long().cuda()
+    #     gt_[:, 0] = 0
+    #     gt = torch.tensor([[l*(1-smoothing_alpha) + smoothing_alpha/len(oh) for l in oh] for i, oh in enumerate(gt_)]).float().cuda()
+        
+    # else:
+    #     gt = torch.ones(num_blocks).long().cuda()    
+    
+    gt = torch.ones(num_blocks).long().cuda()
+    
+    
+        
+    # for dset in tasks:
+    #     loss += F.cross_entropy(gate_logits[dset], gt)
+    
+    # if return_sum:    
+    #     for logit in gate_logits.values():
+    #         loss += F.cross_entropy(logit, gt)
+            
+    # else:
+    #     loss = {}
+    #     for data, logit in gate_logits.items(): loss[data] = F.cross_entropy(logit, gt)
+    
+    all_loss = []
+    
+    for logit in gate_logits.values():
+        # loss = F.cross_entropy(logit, gt, reduction='none') * sparsity_weight
+        
+        loss = 2 * (
+            F.cross_entropy(logit, gt, reduction='none') * sparsity_weight).mean()
+        
+        all_loss.append(loss * lambda_sparsity)
+        
+    if return_sum: return sum(all_loss)
+    else: return {f"{k}_sparsity_loss": all_loss[i] for i, k in enumerate(gate_logits.keys())}
+        
 
 
 def disjointed_gate_loss(gate_logits, tasks, num_blocks, smoothing_alpha=None, sparsity_weight=None):

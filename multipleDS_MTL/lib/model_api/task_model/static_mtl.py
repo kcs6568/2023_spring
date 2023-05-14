@@ -151,8 +151,8 @@ class StaticMTL(nn.Module):
         
         self.fpn = backbone_network.fpn
         
-        self.stem_dict = nn.ModuleDict()
-        self.head_dict = nn.ModuleDict()
+        self.stem = nn.ModuleDict()
+        self.head = nn.ModuleDict()
         
         self.return_layers = {}
         datasets = []
@@ -171,19 +171,26 @@ class StaticMTL(nn.Module):
             'activation_function': kwargs['activation_function']
         }
         
-        if kwargs['init_type'] == 'kaiming':
-            if kwargs['init_dist'] == 'uniform':
-                init_function = init_kaiming_uniform
-            elif kwargs['init_dist'] == 'normal':
-                init_function = init_kaiming_normal
-                
-        elif kwargs['init_type'] == 'xavier':
-            if kwargs['init_dist'] == 'uniform':
-                init_function = init_xavier_uniform
-            elif kwargs['init_dist'] == 'normal':
-                init_function = init_xavier_normal
+        init_type = kwargs['init_type'] if 'init_type' in kwargs else None
+        init_dist = kwargs['init_dist'] if 'init_dist' in kwargs else None
         
-        self.fpn.apply(init_function)
+        init_function = None
+        if init_type is not None and init_dist is not None:
+            if kwargs['init_type'] == 'kaiming':
+                if kwargs['init_dist'] == 'uniform':
+                    init_function = init_kaiming_uniform
+                elif kwargs['init_dist'] == 'normal':
+                    init_function = init_kaiming_normal
+                    
+            elif kwargs['init_type'] == 'xavier':
+                if kwargs['init_dist'] == 'uniform':
+                    init_function = init_xavier_uniform
+                elif kwargs['init_dist'] == 'normal':
+                    init_function = init_xavier_normal
+        
+        
+        use_fpn = True if kwargs['use_fpn'] else False
+        
         for data, cfg in task_cfg.items():
             datasets.append(data)
             self.return_layers.update({data: cfg['return_layers']})
@@ -207,9 +214,11 @@ class StaticMTL(nn.Module):
                 stem = ClfStem(**stem_cfg)
                 head = build_classifier(
                     backbone, num_classes, head_cfg)
-                stem.apply(init_function)
+
+                if init_function is not None: stem.apply(init_function) 
                 
             elif task == 'det':
+                stem_cfg['stem_weight'] = kwargs['stem_weight']
                 stem = DetStem(**stem_cfg)
                 
                 head_cfg.update({'num_anchors': len(backbone_network.body.return_layers)+1})
@@ -217,13 +226,21 @@ class StaticMTL(nn.Module):
                     backbone, detector, 
                     backbone_network.fpn_out_channels, num_classes, **head_cfg)
                 
+                if use_fpn:
+                    if init_function is not None: backbone_network.fpn.apply(init_function)
+                    head = nn.ModuleDict({
+                        'fpn': backbone_network.fpn,
+                        'detector': head
+                    })
+                
             elif task == 'seg':
+                stem_cfg['stem_weight'] = kwargs['stem_weight']
                 stem = SegStem(**stem_cfg)
                 head = build_segmentor(segmentor, num_classes=num_classes, cfg_dict=head_cfg)
             
-            head.apply(init_function)
-            self.stem_dict.update({data: stem})
-            self.head_dict.update({data: head})
+            if init_function is not None: head.apply(init_function)
+            self.stem.update({data: stem})
+            self.head.update({data: head})
         self.datasets = datasets
         
         if 'weight_method' in kwargs:
@@ -258,71 +275,14 @@ class StaticMTL(nn.Module):
         else: self.grad_method = None
         
         # self.all_shared_params_numel, self.each_param_numel = self.compute_shared_encoder_numel()
-            
+        self.activation_function = kwargs['activation_function']
     
-    def get_shared_encoder(self):
-        return self.encoder
-    
-    
-    def compute_shared_encoder_numel(self):
-        each_numel = []
-        for p in self.encoder.parameters():
-            each_numel.append(p.data.numel())
-        return sum(each_numel), each_numel
-    
-    
-    def get_task_stem(self, task):
-        return self.stem_dict[task].stem
-    
-    
-    def get_task_head(self, task):
-        return self.head_dict[task].head
-    
-    
-    def grad2vec(self, clone_grad=False):
-        grad = torch.zeros(self.all_shared_params_numel).to(get_rank())
-        
-        count = 0
-        for n, param in self.encoder.named_parameters():
-            if param.grad is not None:
-                beg = 0 if count == 0 else sum(self.each_param_numel[:count])
-                end = sum(self.each_param_numel[:(count+1)])
-                grad[beg:end] = param.grad.data.view(-1)
-            count += 1
-            
-        if clone_grad: return grad.clone()
-        else: return grad
-        
-        
-    def _reset_grad(self, new_grads):
-        count = 0
-        for n, param in self.encoder.named_parameters():
-            beg = 0 if count == 0 else sum(self.each_param_numel[:count])
-            end = sum(self.each_param_numel[:(count+1)])
-            param.grad = new_grads[beg:end].contiguous().view(param.size()).clone()
-            count += 1
-    
-    
-    def compute_newgrads(self, 
-                         origin_grad, 
-                         cur_iter=None,
-                         total_mean_grad=False):
-        if self.grad_method.require_copied_grad: copied_task_grad2vec = {k: origin_grad[k].clone().to(get_rank()) for k in self.datasets}
-        else: copied_task_grad2vec = None
-       
-        self.encoder.zero_grad() 
-        kwargs = {'iter': cur_iter}
-        new_grads = self.grad_method.backward(origin_grad, copied_task_grad2vec, **kwargs)
-        
-        if total_mean_grad: self._reset_grad(new_grads / len(self.datasets))
-        else: self._reset_grad(new_grads)
-        
         
     def _extract_stem_feats(self, data_dict):
         stem_feats = OrderedDict()
         
         for dset, (images, _) in data_dict.items():
-            stem_feats.update({dset: self.stem_dict[dset](images)})
+            stem_feats.update({dset: self.stem[dset](images)})
         return stem_feats
     
     
@@ -340,7 +300,7 @@ class StaticMTL(nn.Module):
             for layer_idx, num_blocks in enumerate(self.num_per_block):
                 for block_idx in range(num_blocks):
                     identity = ds_module[layer_idx](feat) if block_idx == 0 else feat
-                    feat = F.leaky_relu(block_module[layer_idx][block_idx](feat) + identity)
+                    feat = self.activation_function(block_module[layer_idx][block_idx](feat) + identity)
                     
                     block_count += 1
                     
@@ -352,7 +312,7 @@ class StaticMTL(nn.Module):
             for dset, back_feats in backbone_feats.items():
                 # print(f"start to get the {dset} loss")
                 task = other_hyp["task_list"][dset]
-                head = self.head_dict[dset]
+                head = self.head[dset]
                 
                 targets = data_dict[dset][1]
                 
@@ -360,9 +320,9 @@ class StaticMTL(nn.Module):
                     losses = head(back_feats, targets)
                     
                 elif task == 'det':
-                    fpn_feat = self.fpn(back_feats)
-                    losses = head(data_dict[dset][0], fpn_feat,
-                                            self.stem_dict[dset].transform, 
+                    fpn_feat = head['fpn'](back_feats)
+                    losses = head['detector'](data_dict[dset][0], fpn_feat,
+                                            self.stem[dset].transform, 
                                         origin_targets=targets)
                     
                 elif task == 'seg':
@@ -377,13 +337,13 @@ class StaticMTL(nn.Module):
         else:
             dset = list(other_hyp["task_list"].keys())[0]
             task = list(other_hyp["task_list"].values())[0]
-            head = self.head_dict[dset]
+            head = self.head[dset]
             
             back_feats = backbone_feats[dset]
             
             if task == 'det':
-                fpn_feat = self.fpn(back_feats)
-                predictions = head(data_dict[dset][0], fpn_feat, self.stem_dict[dset].transform)
+                fpn_feat = head['fpn'](back_feats)
+                predictions = head['detector'](data_dict[dset][0], fpn_feat, self.stem[dset].transform)
                 
             else:
                 if task == 'seg':

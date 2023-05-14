@@ -96,7 +96,7 @@ def training(model, optimizer, data_loaders,
     
     if grad_method is not None:
         if hasattr(grad_method, "set_epoch"): grad_method.set_epoch(epoch)
-    
+        
     if args.lossbal:
         loss_calculator = LossCalculator(
             'balancing', args.task_per_dset, args.loss_ratio, weighting_method=weighting_method)
@@ -196,10 +196,11 @@ def training(model, optimizer, data_loaders,
             optimizer.zero_grad(set_to_none=args.grad_to_none)
             losses.backward()
             
-            module.compute_newgrads(
-                origin_grad=grad_dict,
-                cur_iter=i, 
-                total_mean_grad=args.total_mean_grad)
+            if grad_method is not None:
+                module.compute_newgrads(
+                    origin_grad=grad_dict,
+                    cur_iter=i, 
+                    total_mean_grad=args.total_mean_grad)
             
             for n, p in module.named_parameters():
                 if not 'encoder' in n: 
@@ -457,6 +458,7 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         mac_count = 0.
         total_eval_time = 0
         
+        batch_size = 0
         
         total_start_time = time.time()
         for i, data in enumerate(taskloader):
@@ -466,6 +468,8 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
             batch_set: images(torch.cuda.tensor), targets(torch.cuda.tensor)
             '''
             batch_set = metric_utils.preprocess_data(batch_set, data_cats)
+            
+            if i == 0: batch_size = len(batch_set[dataset])
 
             iter_start_time = time.time()
             macs, _, outputs = get_model_complexity_info(
@@ -513,7 +517,7 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         logger.log_text(f"{dataset.upper()} Averaged Evaluation Time: {avg_time_str}")
         task_avg_time.update({dataset: avg_time_str})
         
-        mac_count = torch.tensor(mac_count).cuda()
+        mac_count = torch.tensor(mac_count/batch_size).cuda()
         dist.all_reduce(mac_count)
         logger.log_text(f"All reduced MAC:{round(float(mac_count)*1e-9, 2)}")
         averaged_mac = mac_count/((i+1) * get_world_size())

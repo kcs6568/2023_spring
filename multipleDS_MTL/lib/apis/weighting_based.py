@@ -185,6 +185,11 @@ class DynamicWeightAverage(AbsWeighting):
         self.epoch = 0
         self.name = "DWA"
         self.iter_loss_buffer = {t: [] for t in task_list}
+        
+        self.use_alter_step = True if "alter_step" in params else False
+        if self.use_alter_step:
+            self.apply_method = True if self.epoch in self.alter_step else False
+        else: self.apply_method = True
     
     # def set_before_learning(self, **before_argu):
     #     for k, v in before_argu.items(): setattr(self, k, v)
@@ -217,7 +222,9 @@ class DynamicWeightAverage(AbsWeighting):
             self.train_loss_buffer[k][self.epoch] = torch.stack(loss).mean()
             self.iter_loss_buffer[k] = []
         self.epoch += 1
-    
+
+        if self.use_alter_step:
+            self.apply_method = True if self.epoch in self.alter_step else False
         
     # def save_loss_to_buffer(self, loss_dict):
     #     for k, loss in loss_dict.items(): self.train_loss_buffer[k][self.epoch] = loss

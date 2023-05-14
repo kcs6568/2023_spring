@@ -87,9 +87,9 @@ do
                 CUDA_VISIBLE_DEVICES=$DEVICES torchrun --nproc_per_node=$3 --master_port=$1 \
                     $TRAIN_SCRIPT --general \
                     --cfg $CFG_PATH \
-                    --warmup-ratio -1 --workers 4 --grad-clip-value 1 \
+                    --warmup-ratio 1000 --workers 4 \
                     --exp-case $exp_case --grad-to-none \
-                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma
+                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --resume
 
                 sleep 5
 

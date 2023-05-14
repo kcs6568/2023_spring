@@ -11,5 +11,7 @@ def set_activation_function(activation_type):
         return nn.ReLU6(inplace=True)
     elif activation_type == 'tanh':
         return nn.Tanh()
+    elif activation_type == 'gelu':
+        return nn.GELU()
     
     

@@ -154,7 +154,7 @@ class TrainParser:
         parser.add_argument("--exp-case", default="0", type=str, help="exp case")
         parser.add_argument("--print-freq", default=50, type=int, help="print frequency")
         parser.add_argument("--save-all-epoch", action='store_true')
-        parser.add_argument("--output-dir", default="/root/volume/exp", type=str, help="path to save outputs")
+        parser.add_argument("--output-dir", default="/root/volume/23_spring/mdmtl/exp", type=str, help="path to save outputs")
         
         # distributed training settings
         parser.add_argument("--distributed", action='store_true')

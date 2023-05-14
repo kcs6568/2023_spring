@@ -47,17 +47,17 @@ done
 YAML_CFG=resnet50_1_retrain.yaml
 CFG_PATH=$TRAIN_ROOT/cfgs/three_task/$5/$6/cifar10_minicoco_voc/$YAML_CFG
 
-SCH="multi cosine"
+SCH="step"
 OPT="adamw"
-LR="4e-5"
-GAMMA="0.25"
-DESC_PART="retraining"
+LR="1e-5"
+GAMMA="0.8"
+DESC_PART="[RETRAIN]"
 
 if [ -z $7 ]
 then
-    ADD_DESC=$DESC_PART
+    ADD_DESC=$7
 else
-    ADD_DESC=$7"_"$DESC_PART
+    ADD_DESC=$DESC_PART"_"$7
 fi
 
 for sch in $SCH
@@ -83,7 +83,7 @@ do
                     --cfg $CFG_PATH \
                     --warmup-ratio -1 --workers 4 --grad-clip-value 1 \
                     --exp-case $exp_case --grad-to-none \
-                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --resume 
+                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --resume
 
                 sleep 5
 

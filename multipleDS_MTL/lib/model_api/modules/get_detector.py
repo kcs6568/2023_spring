@@ -99,9 +99,9 @@ class DetStem(nn.Module):
             self.maxpool = None
         
         if stem_weight is not None:
-            print("!!!Load weights for detection stem layer!!!")
-            ckpt = torch.load("/root/volume/pretrained_weights/resnet50_IM1K_dense_stem.pth")
+            ckpt = torch.load(stem_weight, map_location='cpu')
             self.load_state_dict(ckpt)
+            print("!!!Load weights for detection stem layer!!!")
         
         if image_mean is None:
             image_mean = [0.485, 0.456, 0.406]
