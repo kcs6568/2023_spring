@@ -236,11 +236,10 @@ class DynamicWeightAverage(AbsWeighting):
     
     def forward(self, losses, **kwargs):
         assert isinstance(losses, (dict, OrderedDict))
-        
         for k in self.task_list: self.iter_loss_buffer[k].append(losses[k].clone().detach())
         
         if self.epoch < 2:
-            return losses
+            return None
         
         else:
             w_i = {k: torch.Tensor(

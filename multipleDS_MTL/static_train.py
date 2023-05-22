@@ -396,6 +396,14 @@ def main(args):
         checkpoint['best_epoch'] = best_epoch
         checkpoint['total_time'] = total_time
         
+        if getattr(model.module, 'grad_method') is not None:
+            if hasattr(model.module.grad_method, "get_save_information"):
+                checkpoint['grad_method_information'] = model.module.grad_method.get_save_information
+        
+        if getattr(model.module, 'weighting_method') is not None:
+            if hasattr(model.module.weighting_method, "get_save_information"):
+                checkpoint['weighting_method_information'] = model.module.weighting_method.get_save_information
+        
         if tb_logger is not None:
             logged_data = {dset: results[dset] for dset in args.task}
             tb_logger.update_scalars(

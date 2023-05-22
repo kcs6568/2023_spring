@@ -99,20 +99,10 @@ def main(args):
     
     model = build_model(args)
     
-    if args.retrain_phase:
+    if model.retrain_phase:
         from engines import gating_engines as running_engine
-        setattr(model, 'retrain_phase', True)
         retrain_args = args.retrain_args
         args.epochs = retrain_args['epoch']
-        
-        if args.lr_scheduler == 'multi':
-            assert max(retrain_args['scheduler_step']) < retrain_args['epoch']
-            args.lr_steps = retrain_args['scheduler_step']
-        elif args.lr_scheduler == 'step':
-            args.step_size = retrain_args['step_size']
-            
-        if 'gate_opt' in args or 'gate_opt' is not None:
-            args.gate_opt = None
         
         if retrain_args['gated_weight'] == 'mine':
             gating_path = os.path.join(args.output_dir, 'ckpts', f"checkpoint_tmp.pth")
@@ -131,52 +121,55 @@ def main(args):
             for n, p in gated_weight.items():
                 if 'encoder'in n:
                     if base_dataset in n:
-                        start = n.index(base_dataset) 
-                        end = len(base_dataset[1:])+2 + len("encoder") + 1
+                        # start = n.index(base_dataset) 
+                        start = n.index("encoder")
+                        # end = len(base_dataset[1:])+2 + len("encoder") + 1
+                        end = len("encoder"[1:])+2
                         new_key = n[start+end:]
                         encoder_weight[new_key] = p
                     else: continue
                 
                 else:
                     if 'stem' in n:
-                        start = n.index("stem")
-                        end = len("stem"[1:])+2
                         for data in list(train_loaders.keys()):
                             if data in n: 
+                                start = n.index("stem")
+                                end = len("stem"[1:])+2
                                 new_key = f"{data}." + n[start+end:]
                                 task_stem[data][new_key] = p
                                 break
                                     
                     elif 'head' in n:
-                        start = n.index("head")
-                        end = len("head"[1:])+2
-                        new_key = n[start+end:]
+                        for data in list(train_loaders.keys()):
+                            if data in n: 
+                                start = n.index("head")
+                                end = len("head"[1:])+2
+                                new_key = f"{data}." + n[start+end:]
+                                task_head[data][new_key] = p
+                                break
+                        # if 'fpn' in new_key:
+                        #     new_key = new_key.replace("fpn.", "")
+                        #     fpn_weight[new_key] = p
                         
-                        if 'fpn' in new_key:
-                            new_key = new_key.replace("fpn.", "")
-                            fpn_weight[new_key] = p
-                        
-                        else:
-                            for data in list(train_loaders.keys()):
-                                if 'detector' in new_key and data in n:
-                                    new_key = new_key.replace("detector", data)
-                                    task_head[data][new_key] = p
-                                    break
+                        # else:
+                        #     for data in list(train_loaders.keys()):
+                        #         if 'detector' in new_key and data in n:
+                        #             new_key = new_key.replace("detector", data)
+                        #             task_head[data][new_key] = p
+                        #             break
                                 
-                                else:
-                                    if data in n:
-                                        new_key = f"{data}." + new_key
-                                        task_head[data][new_key] = p
-                                        break
+                        #         else:
+                        #             if data in n:
+                        #                 new_key = f"{data}." + new_key
+                        #                 task_head[data][new_key] = p
+                        #                 break
                     
                     elif 'gating' in n:
                         for data in list(train_loaders.keys()):
                             if data in n: gating_weight[data] = p
+                            new_key = None
                             
-                            
-                        
             model.encoder.load_state_dict(encoder_weight, strict=True)
-            model.fpn.load_state_dict(fpn_weight, strict=True)
             
             all_stem = {}
             all_head = {}
@@ -187,8 +180,8 @@ def main(args):
                 if len(all_head) == 0: all_head = task_head[data]
                 else: all_head.update({k: v for k, v in task_head[data].items()})
             
-            model.stem_dict.load_state_dict(all_stem, strict=True)
-            model.head_dict.load_state_dict(all_head, strict=True)
+            model.stem.load_state_dict(all_stem, strict=True)
+            model.head.load_state_dict(all_head, strict=True)
             model.task_gating_params.load_state_dict(gating_weight, strict=True)
             
         else:
@@ -216,7 +209,6 @@ def main(args):
             logger.log_text(lines)
     
     else: 
-        setattr(model, 'retrain_phase', False)
         from engines import gating_engines_ddp as running_engine
     
     if args.only_gate_train:
@@ -228,7 +220,7 @@ def main(args):
             
         setattr(model, 'only_gate_train', args.only_gate_train)
     
-    if args.gate_opt is not None: optimizer = get_optimizer_for_gating(args, model)
+    if 'gate_opt' in args: optimizer = get_optimizer_for_gating(args, model)
     else: optimizer = get_optimizer(args, model)
     logger.log_text(f"Optimizer:\n{optimizer}")
     logger.log_text(f"Apply AMP: {args.amp}")
@@ -433,12 +425,12 @@ def main(args):
             total_time += once_train_results[0]
             logger.log_text("Training Finish\n{}".format('---'*60))
 
-            if lr_scheduler is not None:
-                if warmup_sch is None:
-                    lr_scheduler.step()
+            if warmup_sch is not None:
+                warmup_sch.step()
+            lr_scheduler.step()
                     
-            else:
-                adjust_learning_rate(optimizer, epoch, args)
+            # else:
+            #     adjust_learning_rate(optimizer, epoch, args)
             
             if loss_header is None:
                 header = once_train_results[1][-1]
@@ -523,6 +515,14 @@ def main(args):
         checkpoint['last_results'] = results
         checkpoint['best_epoch'] = best_epoch
         checkpoint['total_time'] = total_time
+        
+        if getattr(model.module, 'grad_method') is not None:
+            if hasattr(model.module.grad_method, "get_save_information"):
+                checkpoint['grad_method_information'] = model.module.grad_method.get_save_information
+        
+        if getattr(model.module, 'weighting_method') is not None:
+            if hasattr(model.module.weighting_method, "get_save_information"):
+                checkpoint['weighting_method_information'] = model.module.weighting_method.get_save_information
         
         if tb_logger is not None:
             logged_data = {dset: results[dset] for dset in args.task}

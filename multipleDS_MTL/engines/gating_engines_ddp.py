@@ -49,10 +49,10 @@ class LossCalculator:
         logging_dict = None
         if self.weighting_method is None: losses = sum(loss for loss in output_losses.values())
         else:
-            task_losses = {data: sum(loss for k, loss in output_losses.items() if data in k) for data in self.data_cats}
+            task_losses = {data: sum(loss for k, loss in output_losses.items() if data in k if not 'sparsity' in k) for data in self.data_cats}
             logging_dict = self.weighting_method(task_losses)
             losses = sum(loss for loss in logging_dict.values())
-            
+        
         return losses, logging_dict
 
 
@@ -90,10 +90,12 @@ def training(model, optimizer, data_loaders,
     else:
         logger.log_text("No Warmup Training")
     
-    logger.log_text(f"Current Sparsity Weight: {args.baseline_args['gate_args']['sparsity_weight']}")
-    
     weighting_method = None if module.weighting_method is None else module.weighting_method
     grad_method = None if module.grad_method is None else module.grad_method
+    
+    if not module.retrain_phase:
+        logger.log_text(f"Current Sparsity Lambda: {args.baseline_args['gate_args']['lambda_sparsity']}")
+        logger.log_text(f"Different Block Weighting: {args.baseline_args['sparsity_weighting'].upper()}\n({module.sparsity_weight})")
     
     if args.lossbal:
         loss_calculator = LossCalculator(
@@ -102,21 +104,10 @@ def training(model, optimizer, data_loaders,
         loss_calculator = LossCalculator(
             'general', args.task_per_dset, args.loss_ratio, weighting_method=weighting_method)
     
-    start_time = time.time()
-    end = time.time()
-    
-    other_args = {"task_list": args.task_per_dset, "current_epoch": epoch}
-    loss_for_save = None
-    
     all_iter_losses = []
     
-    if args.grad_clip_value is not None:
-        clip_value = torch.tensor(args.grad_clip_value, dtype=torch.float)
-        min_grad = torch.neg(clip_value) if clip_value > 0 else clip_value
-        max_grad = clip_value if clip_value > 0 else torch.neg(clip_value)
-    
-    
-    
+    start_time = time.time()
+    end = time.time()
     for i, b_data in enumerate(biggest_dl):
         # print("iteration ",i)
         input_dicts.clear()
@@ -149,9 +140,6 @@ def training(model, optimizer, data_loaders,
                 if not others_dsets[n_task] in input_dicts.keys():
                     input_dicts[others_dsets[n_task]] = next(others_iterator[n_task])
 
-        # finally:
-        #     torch.cuda.synchronize()
-            
         if args.return_count:
             input_dicts.update({'load_count': load_cnt})
         
@@ -197,15 +185,17 @@ def training(model, optimizer, data_loaders,
             optimizer.zero_grad(set_to_none=args.grad_to_none)
             losses.backward()
             
-            module.compute_newgrads(
-                origin_grad=grad_dict,
-                cur_iter=i, 
-                total_mean_grad=args.total_mean_grad)
+            if grad_method is not None:
+                module.compute_newgrads(
+                    origin_grad=grad_dict,
+                    cur_iter=i, 
+                    total_mean_grad=args.total_mean_grad)
             
             for n, p in module.named_parameters():
                 if not 'encoder' in n: 
-                    dist.all_reduce(p.grad)
-                    p.grad /= get_world_size()
+                    if p.requires_grad:
+                        dist.all_reduce(p.grad)
+                        p.grad /= get_world_size()
             
             optimizer.step()      
             
@@ -227,10 +217,20 @@ def training(model, optimizer, data_loaders,
                 logger,
                 i
             )
-            if not module.retrain_phase:
-                logger.log_text(f"Intermediate Gate Logits (up: use / down: no use)")
-                for dset in datasets: logger.log_text(f"{dset}:\n{torch.transpose(module.task_gating_params[dset].data.clone().detach(), 0, 1)}")
-                logger.log_text(f"Temperature: {module.decay_function.temperature}\n")
+            
+            if not model.module.retrain_phase:
+                logger.log_text(f"Intermediate Gate Logits (up: use / down: no use)\n{str(model.module)}")
+                logger.log_text(f"Temperature: {model.module.decay_function.temperature}\n")
+            
+            if weighting_method is not None:
+                logger.log_text(f"{weighting_method.name}_Params: {str(weighting_method)}")
+                
+            if grad_method is not None:
+                if grad_method.print_str: logger.log_text(str(grad_method))
+                if hasattr(grad_method, 'weighting_method'): logger.log_text(str(grad_method.weighting_method))
+            
+            logger.log_text(
+                f"Middle Processing Time: {str(datetime.timedelta(seconds=int(time.time() - start_time)))}")
             
         if tb_logger:
             tb_logger.update_scalars(loss_dict_reduced, i)   
@@ -259,6 +259,14 @@ def training(model, optimizer, data_loaders,
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.log_text(f"{header} Total time: {total_time_str} ({total_time / biggest_size:.4f} s / it)")
+    
+    if grad_method is not None:
+        if hasattr(grad_method, "after_iter"):
+            grad_method.after_iter()
+    
+    if weighting_method is not None:
+        if hasattr(weighting_method, "after_iter"):
+            weighting_method.after_iter()
     
     del data_loaders
     torch.cuda.empty_cache()

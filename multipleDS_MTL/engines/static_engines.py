@@ -239,11 +239,13 @@ def training(model, optimizer, data_loaders,
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.log_text(f"{header} Total time: {total_time_str} ({total_time / biggest_size:.4f} s / it)")
     
-    if hasattr(grad_method, "after_iter"):
-        grad_method.after_iter()
+    if grad_method is not None:
+        if hasattr(grad_method, "after_iter"):
+            grad_method.after_iter()
     
-    if hasattr(weighting_method, "after_iter"):
-        weighting_method.after_iter()
+    if weighting_method is not None:
+        if hasattr(weighting_method, "after_iter"):
+            weighting_method.after_iter()
     
     del data_loaders
     torch.cuda.empty_cache()

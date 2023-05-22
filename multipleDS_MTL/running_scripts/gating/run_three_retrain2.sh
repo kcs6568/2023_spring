@@ -50,7 +50,7 @@ CFG_PATH=$TRAIN_ROOT/cfgs/three_task/$5/$6/cifar10_minicoco_voc/$YAML_CFG
 SCH="cosine"
 OPT="adamw"
 LR="5e-5"
-GAMMA="0.8"
+GAMMA="0.1"
 DESC_PART="[RETRAIN]"
 
 if [ -z $7 ]
@@ -81,7 +81,7 @@ do
                 CUDA_VISIBLE_DEVICES=$DEVICES torchrun --nproc_per_node=$3 --master_port=$1 \
                     $TRAIN_SCRIPT --general \
                     --cfg $CFG_PATH \
-                    --warmup-ratio -1 --workers 4 \
+                    --warmup-ratio 1000 --workers 8 \
                     --exp-case $exp_case --grad-to-none \
                     --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --resume
 

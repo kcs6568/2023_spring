@@ -6,40 +6,23 @@ START_GPU=$3
 NUM_GPU=$4
 BACKBONE=$5
 
-# ./run_single.sh 6000 3 4 resnet50 minicoco_mtan
-
-# while :
-# do
-#     ./run_penta.sh 6000 3 4 resnet50 ucsmv
-#     sleep 30
-# done
-
-
-# while :
-# do
-#     ./run_penta.sh 6000 3 4 resnet50 ucsmv
-#     sleep 30
-# done
-
-
-# while :
-# do
-#     ./run_quad.sh 29500 mtan 3 4 resnet50
-#     sleep 50
-
-# done
-
-
-
-# cd ../gating_scripts
-# cd ./run_main2.sh
-
+PORT=6000
+START_GPU=3
+NUM_GPU=4
 
 cnt=0
 while (( "${cnt}" < 2 )); do
-    ./run_three.sh 29500 7 4 resnet50 gating_ddp pcgrad KaiNorm_totMean_allReduceStHe_SP001
-    # ./run_three_retrain.sh 29500 3 4 resnet50 gating_ddp pcgrad KaiNorm_totMean_allReduce_SP0005
+    ./run_three.sh $PORT $START_GPU $NUM_GPU resnet50 gating_ddp pcgrad SW1_AscendingSW_to5e5_DWA
+    # ./run_three2.sh $PORT $START_GPU $NUM_GPU resnet50 gating_ddp pcgrad warm1000_SW10_AscendingSW_to5e5_DWA
+
+    # ./run_three_retrain.sh $PORT $START_GPU $NUM_GPU resnet50 gating_ddp pcgrad warm1000_SW1_AscendingSW_to5e5_DWA
+    # ./run_three_retrain2.sh $PORT $START_GPU $NUM_GPU resnet50 gating_ddp pcgrad warm1000_SW10_AscendingSW_to5e5_DWA
+
+    # ./run_three.sh 29500 3 4 resnet50 gating custom SP002_clipG
+    # ./run_three_retrain.sh 29500 3 4 resnet50 gating custom SP002_clipG
+
+    # ./run_three2.sh 29500 3 4 resnet50 gating custom SP0005_GELU
+    # ./run_three_retrain2.sh 29500 3 4 resnet50 gating custom SP0005_GELU
+
     (( cnt = "${cnt}" + 1 ))
 done
-
-

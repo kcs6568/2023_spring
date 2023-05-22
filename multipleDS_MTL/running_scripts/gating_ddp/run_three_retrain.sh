@@ -47,9 +47,9 @@ done
 YAML_CFG=resnet50_retrain_1.yaml
 CFG_PATH=$TRAIN_ROOT/cfgs/three_task/$5/$6/cifar10_minicoco_voc/$YAML_CFG
 
-SCH="exp"
+SCH="cosine"
 OPT="adamw"
-LR="1e-5"
+LR="5e-5"
 GAMMA="0.85"
 DESC_PART="[Retrain]"
 
@@ -89,8 +89,7 @@ do
                     --cfg $CFG_PATH \
                     --warmup-ratio -1 --workers 4 \
                     --exp-case $exp_case --grad-to-none \
-                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --resume --validate
-
+                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --resume
                 sleep 5
 
                 if [ $sch == "cosine" ]

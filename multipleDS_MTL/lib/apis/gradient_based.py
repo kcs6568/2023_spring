@@ -284,7 +284,8 @@ class PCGrad(AbsWeighting):
                 setattr(self.weighting_method, key, v)
             
         
-    def backward(self, origin_grad, copied_grads=None, **kwargs):
+    def backward(self, origin_grad, copied_grads=None, 
+                 **kwargs):
         assert copied_grads is not None and self.require_copied_grad
         assert len(origin_grad) > 1 and len(copied_grads) > 1
         
@@ -299,17 +300,30 @@ class PCGrad(AbsWeighting):
                 rand_task = self.task_list[rand_task_idx]
                 dot_grad = torch.dot(copied_grads[std_task], origin_grad[rand_task])
                 
-                if dot_grad < 0:
-                    self.epoch_count[std_task] += 1
-                    self.iter_surgery_count[std_task] += 1
-                    # text += f"{std_task}---{rand_task_idx} (dot: {dot_grad}) | "
-                    per_iteration_count += 1
-                    copied_grads[std_task] -= dot_grad * origin_grad[rand_task] / (origin_grad[rand_task].norm().pow(2))
+                if kwargs['positive_surgery']:
+                    if dot_grad > 0:
+                        self.epoch_count[std_task] += 1
+                        self.iter_surgery_count[std_task] += 1
+                        # text += f"{std_task}---{rand_task_idx} (dot: {dot_grad}) | "
+                        per_iteration_count += 1
+                        copied_grads[std_task] -= dot_grad * origin_grad[rand_task] / (origin_grad[rand_task].norm().pow(2))
+                    
+                else:
+                    if dot_grad < 0:
+                        self.epoch_count[std_task] += 1
+                        self.iter_surgery_count[std_task] += 1
+                        # text += f"{std_task}---{rand_task_idx} (dot: {dot_grad}) | "
+                        per_iteration_count += 1
+                        copied_grads[std_task] -= dot_grad * origin_grad[rand_task] / (origin_grad[rand_task].norm().pow(2))
         
         self.surgery_count.append(per_iteration_count) 
-        new_grads = sum(grad for grad in copied_grads.values())
         
-        return new_grads
+        if not kwargs['positive_surgery']:
+            new_grads = sum(grad for grad in copied_grads.values())
+            return new_grads
+        
+        else:
+            return copied_grads
     
     
     def __str__(self) -> str:

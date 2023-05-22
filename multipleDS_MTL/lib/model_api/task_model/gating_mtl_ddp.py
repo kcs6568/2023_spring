@@ -90,6 +90,8 @@ class DDPGateMTL(nn.Module):
             else: self.grad_method = None
         else: self.grad_method = None
         
+        self.retrain_phase = kwargs['retrain_phase']
+        
         if 'static_weight' in kwargs:
             static_weight = torch.load(kwargs['static_weight'], map_location="cpu")['model']
             # self.load_state_dict(static_weight, strict=True)
@@ -98,30 +100,25 @@ class DDPGateMTL(nn.Module):
             task_head = {d: {} for d in self.datasets}
             
             for k, v in static_weight.items():
-                if not 'encoder' in k and (not "stem" in k and not "head" in k and not "fpn" in k):
-                    remain = k.find(".")
-                    if 'block' in k: new_key = 'block' + k[remain:]
-                    else: new_key = 'ds' + k[remain:]
+                if 'encoder' in k:
+                    new_key = k.replace("encoder.", "")
                     encoder_weight[new_key] = v
                 
                 else:
                     if 'stem' in k:
                         for data in self.datasets:
                             if data in k: 
-                                new_key = k.replace(f'stem_dict.{data}.', "")
+                                new_key = k.replace(f'stem.{data}.', "")
                                 task_stem[data][new_key] = v
+                                break
+                                
                     elif 'head' in k:
                         for data in self.datasets:
                             if data in k:
-                                if not 'coco' in k: new_key = k.replace(f'head_dict.{data}.', "")
-                                else: new_key = k.replace(f'head_dict.{data}', "detector")
+                                new_key = k.replace(f'head.{data}.', "")
                                 task_head[data][new_key] = v
-                        
-                    elif 'fpn' in k:
-                        for data in self.datasets:
-                            if not 'coco' in data: continue
-                            task_head[data][k] = v
-            
+                                break
+                            
             for data, net in self.task_single_network.items():
                 net.encoder.load_state_dict(encoder_weight, strict=True)
                 net.stem.load_state_dict(task_stem[data], strict=True)
@@ -132,7 +129,15 @@ class DDPGateMTL(nn.Module):
         self.decay_function = set_decay_fucntion(kwargs['decay_settings'])
         self._make_gate(kwargs['gate_args'])
         self.current_iters = 0
-        self.dataset_task_pair = {}
+        
+        self.activation_function = kwargs['activation_function']
+        
+        if kwargs['sparsity_weighting'] is None:
+            self.sparsity_weight = 1.0
+        elif kwargs['sparsity_weighting'] == 'ascending':
+            self.sparsity_weight = ((torch.arange(0, sum(self.num_per_block), 1) + 1).float() / sum(self.num_per_block)).cuda()
+        elif kwargs['sparsity_weighting'] == 'descending':
+            self.sparsity_weight = (torch.arange(sum(self.num_per_block), 0, -1).float() / sum(self.num_per_block)).cuda()
         
         
     def get_shared_encoder(self):
@@ -368,12 +373,12 @@ class DDPGateMTL(nn.Module):
                 for block_idx in range(num_blocks):
                     # identity = (ds_module[layer_idx](feat) if block_idx == 0 else feat) * layer_gate[block_count, 1]
                     # block_output = block_module[layer_idx][block_idx](feat) * layer_gate[block_count, 0]
-                    # feat = F.leaky_relu_(block_output + identity)
+                    # feat = self.activation_function_(block_output + identity)
                     
                     identity = (ds_module[layer_idx](feat) if block_idx == 0 else feat)
                     
-                    if layer_gate[block_count, 0]: feat = F.leaky_relu(block_module[layer_idx][block_idx](feat) + identity)
-                    else: feat = F.leaky_relu(identity)
+                    if layer_gate[block_count, 0]: feat = self.activation_function(block_module[layer_idx][block_idx](feat) + identity)
+                    else: feat = self.activation_function(identity)
                     block_count += 1
                     
                     
@@ -406,17 +411,14 @@ class DDPGateMTL(nn.Module):
         for layer_idx, num_blocks in enumerate(self.num_per_block):
             for block_idx in range(num_blocks):
                 identity = ds_module[layer_idx](feat) if block_idx == 0 else feat
+                
                 if self.training:
-                    # if self.seperate_features: block_output = F.leaky_relu(block_module[layer_idx][block_idx](feat))
-                    # else: block_output = F.leaky_relu(block_module[layer_idx][block_idx](feat) + identity)
-                    # feat = (policies[dset][block_count, 0] * block_output) + (policies[dset][block_count, 1] * identity)
-                    
                     block_output = block_module[layer_idx][block_idx](feat) + identity
-                    feat = F.leaky_relu((policies[block_count, 0] * block_output) + (policies[block_count, 1] * identity))
+                    feat = self.activation_function((policies[block_count, 0] * block_output) + (policies[block_count, 1] * identity))
                     
                 else:
-                    if policies[block_count, 0]: feat = F.leaky_relu(block_module[layer_idx][block_idx](feat) + identity) 
-                    else: feat = F.leaky_relu(identity)
+                    if policies[block_count, 0]: feat = self.activation_function(block_module[layer_idx][block_idx](feat) + identity) 
+                    else: feat = self.activation_function(identity)
                 
                 block_count += 1
                 
@@ -460,11 +462,11 @@ class DDPGateMTL(nn.Module):
         losses = {f"feat_{cur_dataset}_{k}": l for k, l in losses.items()}
         total_losses.update(losses)
         
-        
         if not self.retrain_phase:
             disjointed_loss = disjointed_policy_loss(
-                    self.task_gating_params[cur_dataset], 
+                    self.task_gating_params, 
                     sum(self.num_per_block),
+                    self.lambda_sparsity,
                     sparsity_weight=self.sparsity_weight, 
                     smoothing_alpha=self.label_smoothing_alpha,
                     return_sum=self.return_sum)
@@ -474,7 +476,7 @@ class DDPGateMTL(nn.Module):
                     if isinstance(disjointed_loss, dict): total_losses.update(disjointed_loss)
                     else: total_losses.update({"sparsity": disjointed_loss})
             # else: total_losses.update({"sparsity": disjointed_loss * self.sparsity_weight})
-            else: total_losses.update({f"{cur_dataset}_sparsity": disjointed_loss})
+            else: total_losses.update(disjointed_loss)
             
         return total_losses
     

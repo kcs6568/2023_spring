@@ -280,6 +280,7 @@ class ResNet(nn.Module):
     ) -> None:
         super(ResNet, self).__init__()
         if norm_layer is None:
+            nn.utils.memory_format
             norm_layer = nn.BatchNorm2d
         self._norm_layer = norm_layer
         

@@ -47,7 +47,7 @@ done
 YAML_CFG=resnet50_1.yaml
 CFG_PATH=$TRAIN_ROOT/cfgs/three_task/$5/$6/cifar10_minicoco_voc/$YAML_CFG
 
-SCH="multi"
+SCH="cosine"
 OPT="adamw"
 LR="1e-4"
 GAMMA="0.1"
@@ -61,7 +61,7 @@ else
     then
         ADD_DESC=$7
     else
-        ADD_DESC=$7_$DESC_PART
+        ADD_DESC=$DESC_PART"_"$7
     fi
 fi
 

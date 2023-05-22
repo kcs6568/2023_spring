@@ -138,10 +138,21 @@ def main(args):
                     if not torch.all(checklist): p.copy_(gated_weight[n])
         else:
             model.load_state_dict(gated_weight['model'], strict=False)
+            
+        # for dset, gate in model.task_gating_params.items():
+        #     print(dset)
+        #     print(gate.t())
+        #     prob = torch.softmax(gate, dim=1)
+        #     print(prob.t())
+        #     print()
+        # exit()
+        
+        logger.log_text(str(model))
         model.fix_gate()
         logger.log_text(model.print_fixed_gate_info())
         
         gated_block_p, ds_param, total_param = model.compute_subnetwork_size()
+        
         
         sum_ds = float(sum(ds_param))
         sum_total = float(sum(total_param)) + sum_ds
@@ -150,7 +161,7 @@ def main(args):
             lines = f"{data} gated parameters:"
             lines += f" {round(sump*(1e-6) + sum_ds*(1e-6), 3)}M/{round(sum_total*(1e-6), 3)}M"
             logger.log_text(lines)
-    
+        
     if args.only_gate_train:
         learnable_params = ['gating', 'weighting']
         for n, p in model.named_parameters():
@@ -214,25 +225,26 @@ def main(args):
             
             optimizer.load_state_dict(checkpoint["optimizer"])
             
-            if 'gamma' in checkpoint['lr_scheduler']:
-                if checkpoint['lr_scheduler']['gamma'] != args.gamma:
-                    checkpoint['lr_scheduler']['gamma'] = args.gamma
-                    
-            if 'milestones' in checkpoint['lr_scheduler']:
-                if args.lr_steps != sorted(checkpoint['lr_scheduler']['milestones'].elements()):
-                    checkpoint['lr_scheduler']['milestones'] = Counter(args.lr_steps)
-                
-                tmp_lr = args.lr
-                for m in checkpoint['lr_scheduler']['milestones']:
-                    if checkpoint['lr_scheduler']['last_epoch'] > m:
-                        tmp_lr *= args.gamma
+            if args.lr_config['type'] in ["step", "multi"] :
+                if 'gamma' in checkpoint['lr_scheduler']:
+                    if checkpoint['lr_scheduler']['gamma'] != args.lr_config['gamma']:
+                        checkpoint['lr_scheduler']['gamma'] = args.lr_config['gamma']
                         
-                    elif checkpoint['lr_scheduler']['last_epoch'] == m:
-                        tmp_lr *= args.gamma
-                        break
-                    
-                checkpoint['lr_scheduler']['_last_lr'][0] = tmp_lr
-                optimizer.param_groups[0]['lr'] = tmp_lr
+                if 'milestones' in checkpoint['lr_scheduler']:
+                    if args.lr_config['milestones'] != sorted(checkpoint['lr_scheduler']['milestones'].elements()):
+                        checkpoint['lr_scheduler']['milestones'] = Counter(args.lr_config['milestones'])
+
+                    tmp_lr = args.lr
+                    for m in checkpoint['lr_scheduler']['milestones']:
+                        if checkpoint['lr_scheduler']['last_epoch'] > m:
+                            tmp_lr *= args.gamma
+                            
+                        elif checkpoint['lr_scheduler']['last_epoch'] == m:
+                            tmp_lr *= args.gamma
+                            break
+                        
+                    checkpoint['lr_scheduler']['_last_lr'][0] = tmp_lr
+                    optimizer.param_groups[0]['lr'] = tmp_lr
             
             # elif args.lr_scheduler == 'step':
             #     if checkpoint['lr_scheduler']['step_size'] != args.step_size:
@@ -278,6 +290,16 @@ def main(args):
                     
             logger.log_text(f"Next Temperature for Training: {model.module.decay_function.temperature}")
             
+            if 'grad_method_information' in checkpoint:
+                model.module.grad_method.set_saved_information(checkpoint['grad_method_information'])
+                logger.log_text(f"saved gradient method variables:\n{checkpoint['grad_method_information'].keys()}")
+                # logger.log_text(f"Previous gradient managing count: {len(model.module.grad_method.surgery_count)}")
+                
+            if 'weighting_method_information' in checkpoint:
+                model.module.weighting_method.set_saved_information(checkpoint['weighting_method_information'])
+                logger.log_text(f"saved weighting method variables:\n{checkpoint['weighting_method_information'].keys()}")
+            
+            
         except Exception as e:
             logger.log_text(f"The resume file is not exist\n{e}")
             
@@ -316,13 +338,16 @@ def main(args):
         if args.resume_tmp:
             args.resume_tmp = False
 
-    if args.start_epoch <= args.warmup_epoch:
-        if args.warmup_epoch > 1:
-            args.warmup_ratio = 1
-        biggest_size = len(list(train_loaders.values())[0])
-        warmup_sch = get_warmup_scheduler(optimizer, args.warmup_ratio, biggest_size * args.warmup_epoch)
+    if args.start_epoch > 0: warmup_sch = None
+
     else:
-        warmup_sch = None
+        if args.start_epoch <= args.warmup_epoch:
+            if args.warmup_epoch > 1:
+                args.warmup_ratio = 1
+            biggest_size = len(list(train_loaders.values())[0])
+            warmup_sch = get_warmup_scheduler(optimizer, args.warmup_ratio, biggest_size * args.warmup_epoch)
+        else:
+            warmup_sch = None
     
     logger.log_text(f"Parer Arguments:\n{args}")
 
@@ -372,13 +397,12 @@ def main(args):
                 warmup_sch=warmup_sch)
             total_time += once_train_results[0]
             logger.log_text("Training Finish\n{}".format('---'*60))
-
-            if lr_scheduler is not None:
-                if warmup_sch is None:
-                    lr_scheduler.step()
-                    
-            else:
-                adjust_learning_rate(optimizer, epoch, args)
+            
+            if warmup_sch is not None:
+                warmup_sch.step()
+            lr_scheduler.step()
+            
+            # continue
             
             if loss_header is None:
                 header = once_train_results[1][-1]
@@ -464,6 +488,14 @@ def main(args):
         checkpoint['best_epoch'] = best_epoch
         checkpoint['total_time'] = total_time
         
+        if getattr(model.module, 'grad_method') is not None:
+            if hasattr(model.module.grad_method, "get_save_information"):
+                checkpoint['grad_method_information'] = model.module.grad_method.get_save_information
+        
+        if getattr(model.module, 'weighting_method') is not None:
+            if hasattr(model.module.weighting_method, "get_save_information"):
+                checkpoint['weighting_method_information'] = model.module.weighting_method.get_save_information
+        
         if tb_logger is not None:
             logged_data = {dset: results[dset] for dset in args.task}
             tb_logger.update_scalars(
@@ -487,9 +519,12 @@ def main(args):
         
         if args.resume_tmp:
             args.resume_tmp = False
-        
+
         if args.distributed: torch.cuda.synchronize()
         time.sleep(2)
+        
+        
+        
     # End Training -----------------------------------------------------------------------------
     
     all_train_val_time = time.time() - start_time

@@ -14,6 +14,7 @@ TRAIN_SCRIPT=$TRAIN_ROOT/$TRAIN_FILE
 # $KILL_PROC
 # exit 1 
 
+
 # make visible devices order automatically
 DEVICES=""
 d=$(($2-$3))
@@ -43,20 +44,25 @@ done
 #     CFG_PATH=/root/src/gated_mtl/cfgs/four_task/static/cifar10_stl10_minicoco_voc_city
 # fi
 
-YAML_CFG=resnet50_2_retrain.yaml
+YAML_CFG=resnet50_retrain_2.yaml
 CFG_PATH=$TRAIN_ROOT/cfgs/three_task/$5/$6/cifar10_minicoco_voc/$YAML_CFG
 
-SCH="multi cosine"
+SCH="cosine"
 OPT="adamw"
-LR="4e-5"
-GAMMA="0.25"
-DESC_PART="retraining"
+LR="5e-5"
+GAMMA="0.85"
+DESC_PART="[Retrain]"
 
 if [ -z $7 ]
 then
     ADD_DESC=$DESC_PART
 else
-    ADD_DESC=$7"_"$DESC_PART
+    if [ -z $DESC_PART ]
+    then
+        ADD_DESC=$7
+    else
+        ADD_DESC=$DESC_PART_$7
+    fi
 fi
 
 
@@ -81,10 +87,9 @@ do
                 CUDA_VISIBLE_DEVICES=$DEVICES torchrun --nproc_per_node=$3 --master_port=$1 \
                     $TRAIN_SCRIPT --general \
                     --cfg $CFG_PATH \
-                    --warmup-ratio -1 --workers 4 --grad-clip-value 1 \
+                    --warmup-ratio -1 --workers 4 \
                     --exp-case $exp_case --grad-to-none \
-                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --resume 
-
+                    --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --resume
                 sleep 5
 
                 if [ $sch == "cosine" ]

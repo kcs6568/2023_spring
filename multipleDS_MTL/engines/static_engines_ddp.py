@@ -274,12 +274,13 @@ def training(model, optimizer, data_loaders,
     #     if module.grad_method.weighting_method.name == 'GradDWA':
     #         if hasattr(module, "after_iters"): module.after_iters()
     
-    if hasattr(grad_method, "after_iter"):
-        grad_method.after_iter()
+    if grad_method is not None:
+        if hasattr(grad_method, "after_iter"):
+            grad_method.after_iter()
     
-    if hasattr(weighting_method, "after_iter"):
-        weighting_method.after_iter()
-      
+    if weighting_method is not None:
+        if hasattr(weighting_method, "after_iter"):
+            weighting_method.after_iter()
     
     del data_loaders
     torch.cuda.empty_cache()

@@ -17,6 +17,7 @@ from ...apis.warmup import set_decay_fucntion
 from ...apis.gradient_based import define_gradient_method
 from ...apis.weighting_based import define_weighting_method
 
+from ...utils.dist_utils import *
 
 def init_weights(m, type="kaiming"):
     if isinstance(m, nn.Conv2d):
@@ -172,11 +173,14 @@ class GateMTL(nn.Module):
             # head.apply(init_weights)
             self.stem.update({data: stem})
             self.head.update({data: head})
+            
+        self.retrain_phase = kwargs['retrain_phase']
         
-        if 'static_weight' in kwargs:
-            static_weight = torch.load(kwargs['static_weight'], map_location="cpu")['model']
-            self.load_state_dict(static_weight, strict=True)
-            print("!!!Load weights of Hard Parameter Sharing Baseline!!!")
+        if not self.retrain_phase and 'static_weight' in kwargs:
+            if kwargs['static_weight'] is not None:
+                static_weight = torch.load(kwargs['static_weight'], map_location="cpu")['model']
+                self.load_state_dict(static_weight, strict=True)
+                print("!!!Load weights of Hard Parameter Sharing Baseline!!!")
 
         self.decay_function = set_decay_fucntion(kwargs['decay_settings'])
         self.data_list = data_list
@@ -198,18 +202,18 @@ class GateMTL(nn.Module):
             self.compute_grad_dim
         else: self.grad_method = None
         
-        self.retrain_phase = kwargs['retrain_phase']
         self.activation_function = kwargs['activation_function']
         
         if self.retrain_phase:
             self.activation_function.inplace = False
         
-        if kwargs['sparsity_weighting'] is None:
-            self.sparsity_weight = 1.0
-        elif kwargs['sparsity_weighting'] == 'ascending':
-            self.sparsity_weight = ((torch.arange(0, sum(self.num_per_block), 1) + 1).float() / sum(self.num_per_block)).cuda()
-        elif kwargs['sparsity_weighting'] == 'descending':
-            self.sparsity_weight = (torch.arange(sum(self.num_per_block), 0, -1).float() / sum(self.num_per_block)).cuda()
+        if not self.retrain_phase:
+            if kwargs['sparsity_weighting'] == 'equal':
+                self.sparsity_weight = torch.ones(sum(self.num_per_block)).float().cuda()
+            elif kwargs['sparsity_weighting'] == 'ascending':
+                self.sparsity_weight = ((torch.arange(0, sum(self.num_per_block), 1) + 1).float() / sum(self.num_per_block)).cuda()
+            elif kwargs['sparsity_weighting'] == 'descending':
+                self.sparsity_weight = (torch.arange(sum(self.num_per_block), 0, -1).float() / sum(self.num_per_block)).cuda()
             
             
     @property
@@ -248,6 +252,7 @@ class GateMTL(nn.Module):
     
     def fix_gate(self):
         layer_count = []
+        gating_info = []
         for data in self.data_list:
             distribution = torch.softmax(self.task_gating_params[data], dim=1)
             task_gate = torch.tensor([torch.argmax(gate, dim=0) for gate in distribution])
@@ -256,8 +261,9 @@ class GateMTL(nn.Module):
             self.task_gating_params[data].data = final_gate
             self.task_gating_params[data].requires_grad = False
             
-            layer_count.append(final_gate[:, 0])
+        layer_count.append(final_gate[:, 0])
         layer_count = torch.sum(torch.stack(layer_count, dim=1), dim=1)
+        
         
         block_count = 0
         for layer_idx, num_blocks in enumerate(self.num_per_block):
@@ -370,13 +376,15 @@ class GateMTL(nn.Module):
                     
                     if layer_gate[block_count, 0]: feat = self.activation_function(block_module[layer_idx][block_idx](feat) + identity)
                     else: feat = self.activation_function(identity)
+                    
                     block_count += 1
                     
                     
                     
                 if block_idx == (num_blocks - 1):
                     if str(layer_idx) in self.return_layers[dset]:
-                        backbone_feats[dset].update({str(layer_idx): feat})
+                          backbone_feats[dset].update({str(layer_idx): feat})
+            
         if self.training:
             return self._forward_train(data_dict, backbone_feats, other_hyp)
         
@@ -446,11 +454,6 @@ class GateMTL(nn.Module):
                                         self.stem[dset].transform, 
                                     origin_targets=targets)
                 
-                # fpn_feat = head['fpn'](back_feats)
-                # losses = head['detector'](data_dict[dset][0], fpn_feat,
-                #                         self.stem[dset].transform, 
-                #                     origin_targets=targets)
-                
             elif task == 'seg':
                 losses = head(
                     back_feats, targets, input_shape=targets.shape[-2:])
@@ -504,74 +507,93 @@ class GateMTL(nn.Module):
         
         return predictions
     
-             
-        # if self.training:
-        #     for dset, back_feats in backbone_feats.items():
-        #         task = other_hyp["task_list"][dset]
-        #         head = self.head[dset]
-                
-        #         targets = data_dict[dset][1]
-                
-        #         if task == 'clf':
-        #             losses = head(back_feats, targets)
-                    
-        #         elif task == 'det':
-        #             fpn_feat = head['fpn'](back_feats)
-        #             losses = head['detector'](data_dict[dset][0], fpn_feat,
-        #                                     self.stem[dset].transform, 
-        #                                 origin_targets=targets)
-                    
-        #         elif task == 'seg':
-        #             losses = head(
-        #                 back_feats, targets, input_shape=targets.shape[-2:])
-                
-        #         losses = {f"feat_{dset}_{k}": l for k, l in losses.items()}
-        #         total_losses.update(losses)
-                
-        #     disjointed_loss = disjointed_policy_loss(
-        #             self.task_gating_params, 
-        #             sum(self.num_per_block), 
-        #             smoothing_alpha=self.label_smoothing_alpha)
+        
+    def grad2vec(self, task, clone_grad=False):
+        grad = torch.zeros(self.all_shared_params_numel).to(get_rank())
+        count = 0
+        
+        for n, param in self.task_single_network[task].encoder.named_parameters():
+            if param.grad is not None:
+                beg = 0 if count == 0 else sum(self.each_param_numel[:count])
+                end = sum(self.each_param_numel[:(count+1)])
+                grad[beg:end] = param.grad.data.view(-1)
+            count += 1
             
-        #     # if self.wm is not None:
-        #     #     print("=="*60)
-        #     #     print(total_losses)
-        #     #     print(disjointed_loss)
-        #     #     assert isinstance(disjointed_loss, (dict, OrderedDict))
-        #     #     wm_gate_loss = self.wm(disjointed_loss)
-        #     #     print(wm_gate_loss)
-        #     #     print("||"*60)
-        #     #     total_losses.update({f"Sparse{self.wm.method_name}_{k}": l for k, l in wm_gate_loss.items()})    
-        #     # else:
-        #     #     total_losses.update({"disjointed": disjointed_loss * self.sparsity_weight})
-        #     total_losses.update({"sparsity": disjointed_loss * self.sparsity_weight})
+        if clone_grad: return grad.clone()
+        else: return grad
+    
+    
+    def _grad2vec_head(self, task):
+        grad = torch.zeros(self.head_numel[task][0]).to(get_rank())
+        count = 0
+        
+        for n, param in self.get_task_head(task).named_parameters():
+            if param.grad is not None:
+                beg = 0 if count == 0 else sum(self.head_numel[task][1][:count])
+                end = sum(self.head_numel[task][1][:(count+1)])
+                grad[beg:end] = param.grad.data.view(-1)
+            count += 1
+        return grad
+        
+        
+    def _reset_grad(self, new_grads):
+        for dset, gate_param in self.task_gating_params.items():
+            gate_param.grad[:, 0] = new_grads[dset].clone()
+        
+    
+    def _transfer_computed_grad(self):
+        for d in self.datasets:
+            if d == self.base_dataset: continue
+            for base, target in zip(
+                self.get_shared_encoder().parameters(),
+                self.task_single_network[d].encoder.parameters()):
+                target.grad = base.grad
+    
+    
+    # def compute_newgrads(self, origin_grad=None, cur_iter=None, total_mean_grad=False):
+    def compute_newgrads(self, total_mean_grad=False):
+        gate_grad = {k: self.task_gating_params[k].grad[:, 0].clone().to(get_rank()) for k in self.data_list}
+        
+        if self.grad_method.require_copied_grad: copied_gate_grad = {k: gate_grad[k].clone().to(get_rank()) for k in self.data_list}
+        else: copied_gate_grad = None
+        # self.task_gating_params.zero_grad()
+        
+        kwargs = {"positive_surgery": True}
+        new_grads = self.grad_method.backward(gate_grad, copied_gate_grad, 
+                                              **kwargs)
+        
+        for dset in self.data_list:
+            dist.all_reduce(new_grads[dset])
+            new_grads[dset] /= dist.get_world_size()   
+        
+        self._reset_grad(new_grads)
+        
+        # dist.all_reduce(new_grads)
+        # new_grads /= dist.get_world_size() 
+        
+        # if total_mean_grad: self._reset_grad(new_grads/len(gate_grad))
+        # else: self._reset_grad(new_grads)
+        
+        # if origin_grad is None:
+        #     origin_grad = {k: self._grad2vec(k) for k in self.datasets}
             
-            
+        # assert origin_grad is not None
                 
-        #     return total_losses
-            
-        # else:
-        #     dset = list(other_hyp["task_list"].keys())[0]
-        #     task = list(other_hyp["task_list"].values())[0]
-        #     head = self.head[dset]
-            
-        #     back_feats = backbone_feats[dset]
-                    
-        #     if task == 'det':
-        #         fpn_feat = head['fpn'](back_feats)
-        #         predictions = head['detector'](data_dict[dset][0], fpn_feat, self.stem[dset].transform)
-                
-        #     else:
-        #         if task == 'seg':
-        #             predictions = head(
-        #                 back_feats, input_shape=data_dict[dset][0].shape[-2:])
-            
-        #         else:
-        #             predictions = head(back_feats)
-                
-        #         predictions = dict(outputs=predictions)
-            
-        #     return predictions
+        # if self.grad_method.require_copied_grad: copied_task_grad2vec = {k: origin_grad[k].clone().to(get_rank()) for k in self.datasets}
+        # else: copied_task_grad2vec = None
+        # self.grad_zero_shared_encoder 
+        
+        # new_grads = self.grad_method.backward(origin_grad, copied_task_grad2vec)
+        
+        # dist.all_reduce(new_grads)
+        # new_grads /= dist.get_world_size()
+        
+        # if total_mean_grad: self._reset_grad(new_grads/len(origin_grad))
+        # else: self._reset_grad(new_grads)
+        
+        # self._transfer_computed_grad()
+        
+          
         
 
     def forward(self, data_dict, kwargs):
@@ -584,10 +606,25 @@ class GateMTL(nn.Module):
             return self.get_features(data_dict, kwargs)
 
     
+    def print_fixed_gate_info(self):
+        info = "[Fixed Gate Information]:\n"
+        
+        for data in self.data_list:
+            gate = self.task_gating_params[data]
+            info += f"{data}:\n"
+            info += f"Exploiting: {gate[:, 0]}\n"
+            info += f"  Dropping: {gate[:, 1]}\n\n"
+            
+            
+        return info
+    
+    
     def __str__(self) -> str:
         info = f"[Current Gate Parameter States]\n"
         for data in self.data_list:
             gate = self.task_gating_params[data]
-            info += f"{data} (trainable?: {gate.requires_grad}):\n{torch.transpose(gate.data, 0, 1)}\n"
+            if self.retrain_phase: train_gate = False
+            else: train_gate = True
+            info += f"{data} (trainable?: {train_gate}):\n{torch.transpose(gate.data, 0, 1)}\n"
             
         return info

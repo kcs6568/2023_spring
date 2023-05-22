@@ -269,8 +269,7 @@ class StaticMTL(nn.Module):
                         grad_weighting_method = define_weighting_method(gw_type)
                         if init_param: grad_weighting_method.init_params(self.datasets, **gw_params)
                         setattr(self.grad_method, 'weighting_method', grad_weighting_method)
-                        
-                        
+            
             else: self.grad_method = None
         else: self.grad_method = None
         
