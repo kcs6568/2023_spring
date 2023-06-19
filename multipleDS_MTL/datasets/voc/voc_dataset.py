@@ -120,6 +120,8 @@ class VOCSegmentation(VOCDataset):
         if self.transform is not None:
             img, target = self.transform(img, target)
 
+        # return img, {"sseg": target}
+        
         return img, target
 
 

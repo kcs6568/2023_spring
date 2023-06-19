@@ -205,6 +205,9 @@ class PCGrad(AbsWeighting):
             self.apply_method = True if self.epoch in self.alter_step else False
         else: self.apply_method = True
         
+        if 'positive_surgery' not in params:
+            self.positive_surgery = False
+        
     def after_iter(self):
         self.iter_surgery_count = {k: 0 for k in self.task_list}
         self.epoch += 1
@@ -300,7 +303,7 @@ class PCGrad(AbsWeighting):
                 rand_task = self.task_list[rand_task_idx]
                 dot_grad = torch.dot(copied_grads[std_task], origin_grad[rand_task])
                 
-                if kwargs['positive_surgery']:
+                if self.positive_surgery:
                     if dot_grad > 0:
                         self.epoch_count[std_task] += 1
                         self.iter_surgery_count[std_task] += 1
@@ -318,7 +321,7 @@ class PCGrad(AbsWeighting):
         
         self.surgery_count.append(per_iteration_count) 
         
-        if not kwargs['positive_surgery']:
+        if not self.positive_surgery:
             new_grads = sum(grad for grad in copied_grads.values())
             return new_grads
         

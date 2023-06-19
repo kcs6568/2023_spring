@@ -45,8 +45,9 @@ class TrainParser:
         
         # training settings
         parser.add_argument("--use-awl", action='store_true')
-        parser.add_argument("--warmup", action='store_false')
+        parser.add_argument("--warmup", action='store_true')
         parser.add_argument("--warmup-ratio", type=float, default=0.6)
+        parser.add_argument("--warmup-iters", type=int, default=1000)
         parser.add_argument("--warmup-epoch", type=int, default=1)
         parser.add_argument("--start_epoch", default=0, type=int, help="start epoch")
         parser.add_argument("--epochs", default=12, type=int, help="number of total epochs to run")
@@ -154,7 +155,7 @@ class TrainParser:
         parser.add_argument("--exp-case", default="0", type=str, help="exp case")
         parser.add_argument("--print-freq", default=50, type=int, help="print frequency")
         parser.add_argument("--save-all-epoch", action='store_true')
-        parser.add_argument("--output-dir", default="/root/volume/23_spring/mdmtl/exp", type=str, help="path to save outputs")
+        parser.add_argument("--output-dir", default="/root/volume/exp", type=str, help="path to save outputs")
         
         # distributed training settings
         parser.add_argument("--distributed", action='store_true')

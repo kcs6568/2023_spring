@@ -1,17 +1,159 @@
-from collections import OrderedDict
-from pickletools import optimize
-from sqlite3 import paramstyle
+import math
 
 import torch
+import torch.nn.functional as F
 from torch.optim.lr_scheduler import _LRScheduler
+
+
+class Fromage(torch.optim.Optimizer):
+
+    def __init__(self, params, lr=0.01, p_bound=None):
+        """The Fromage optimiser.
+        Arguments:
+            lr (float): The learning rate. 0.01 is a good initial value to try.
+            p_bound (float): Restricts the optimisation to a bounded set. A
+                value of 2.0 restricts parameter norms to lie within 2x their
+                initial norms. This regularises the model class.
+        """
+        self.p_bound = p_bound
+        defaults = dict(lr=lr)
+        super(Fromage, self).__init__(params, defaults)
+
+    def step(self, closure=None):
+        """Performs a single optimization step.
+        Arguments:
+            closure (callable, optional): A closure that reevaluates the model
+                and returns the loss.
+        """
+        loss = None
+        if closure is not None:
+            loss = closure()
+
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                state = self.state[p]
+                if len(state) == 0 and self.p_bound is not None:
+                    state['max'] = self.p_bound*p.norm().item()
+                
+                d_p = p.grad.data
+                d_p_norm = p.grad.norm()
+                p_norm = p.norm()
+
+                if p_norm > 0.0 and d_p_norm > 0.0:
+                    p.data.add_(d_p * (p_norm / d_p_norm), alpha=-group['lr'])
+                else:
+                    p.data.add_(d_p, alpha=-group['lr'])
+                p.data /= math.sqrt(1+group['lr']**2)
+
+                if self.p_bound is not None:
+                    p_norm = p.norm().item()
+                    if p_norm > state['max']:
+                        p.data *= state['max']/p_norm
+
+        return loss
+    
+    
+class AdamP(torch.optim.Optimizer):
+    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
+                 weight_decay=0, delta=0.1, wd_ratio=0.1, nesterov=False):
+        defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay,
+                        delta=delta, wd_ratio=wd_ratio, nesterov=nesterov)
+        super(AdamP, self).__init__(params, defaults)
+
+    def _channel_view(self, x):
+        return x.view(x.size(0), -1)
+
+    def _layer_view(self, x):
+        return x.view(1, -1)
+
+    def _cosine_similarity(self, x, y, eps, view_func):
+        x = view_func(x)
+        y = view_func(y)
+
+        return F.cosine_similarity(x, y, dim=1, eps=eps).abs_()
+
+    def _projection(self, p, grad, perturb, delta, wd_ratio, eps):
+        wd = 1
+        expand_size = [-1] + [1] * (len(p.shape) - 1)
+        for view_func in [self._channel_view, self._layer_view]:
+
+            cosine_sim = self._cosine_similarity(grad, p.data, eps, view_func)
+
+            if cosine_sim.max() < delta / math.sqrt(view_func(p.data).size(1)):
+                p_n = p.data / view_func(p.data).norm(dim=1).view(expand_size).add_(eps)
+                perturb -= p_n * view_func(p_n * perturb).sum(dim=1).view(expand_size)
+                wd = wd_ratio
+
+                return perturb, wd
+
+        return perturb, wd
+
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            loss = closure()
+
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad.data
+                beta1, beta2 = group['betas']
+                nesterov = group['nesterov']
+
+                state = self.state[p]
+
+                # State initialization
+                if len(state) == 0:
+                    state['step'] = 0
+                    state['exp_avg'] = torch.zeros_like(p.data)
+                    state['exp_avg_sq'] = torch.zeros_like(p.data)
+
+                # Adam
+                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
+
+                state['step'] += 1
+                bias_correction1 = 1 - beta1 ** state['step']
+                bias_correction2 = 1 - beta2 ** state['step']
+
+                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+
+                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(group['eps'])
+                step_size = group['lr'] / bias_correction1
+
+                if nesterov:
+                    perturb = (beta1 * exp_avg + (1 - beta1) * grad) / denom
+                else:
+                    perturb = exp_avg / denom
+
+                # Projection
+                wd_ratio = 1
+                if len(p.shape) > 1:
+                    perturb, wd_ratio = self._projection(p, grad, perturb, group['delta'], group['wd_ratio'], group['eps'])
+
+                # Weight decay
+                if group['weight_decay'] > 0:
+                    p.data.mul_(1 - group['lr'] * group['weight_decay'] * wd_ratio)
+
+                # Step
+                p.data.add_(perturb, alpha=-step_size)
+
+        return loss
+
+
 
 
 def select_scheduler(optimizer, lr_config, args):
     scheduler_type = lr_config['type']
     
     if scheduler_type  == "step":
-        if not 'step_size' in lr_config: step_size = 1
-        if not 'gamma' in lr_config: gamma = 0.1 if not 'step_size' in lr_config else 0.8
+        step_size = 1 if not 'step_size' in lr_config else lr_config['step_size']
+        gamma = 0.1 if not 'gamma' in lr_config else lr_config['gamma']
         
         main_sch = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
         
@@ -153,8 +295,28 @@ def get_scheduler_for_gating(args, optimizer):
 
 
 def get_optimizer(args, model):
-    params = [p for n, p in model.named_parameters() if p.requires_grad] # in ddp setting
+    if "opt_config" in args:
+        assert args.opt_config is not None
         
+        
+        params = []
+        {'params': [p for n, p in model.named_parameters() if p.requires_grad and not 'gating' in n]}
+        if "sep_keys" in args.opt_config:
+            else_dict = {'params': [p for n, p in model.named_parameters() if p.requires_grad and not args.opt_config["sep_keys"] in n]}
+            params.append(else_dict)
+            
+            param_dict = {'params': [p for n, p in model.named_parameters() if p.requires_grad and args.opt_config["sep_keys"] in n], "lr": args.opt_config["lr"]}
+            params.append(param_dict)
+            
+        else:
+            params = [p for n, p in model.named_parameters() if p.requires_grad] # in ddp setting
+            
+    else:
+        params = [p for n, p in model.named_parameters() if p.requires_grad] # in ddp setting
+    
+    if "lr" in args.lr_config:
+        args.lr = args.lr_config["lr"]
+    
     if args.opt == 'sgd':
         optimizer = torch.optim.SGD(params, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     elif args.opt == 'nesterov':
@@ -164,6 +326,11 @@ def get_optimizer(args, model):
         else: optimizer = torch.optim.Adam(params, lr=args.lr, weight_decay=args.weight_decay)
     elif args.opt =='adamw':
         optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
+    elif args.opt =='adamp':
+        optimizer = AdamP(params, lr=args.lr, weight_decay=args.weight_decay)
+    elif args.opt == "fromage":
+        optimizer = Fromage(params, lr=args.lr)    
+    
 
     return optimizer
 

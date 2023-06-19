@@ -417,8 +417,12 @@ class GateMTL(nn.Module):
                     identity = ds_module[layer_idx](feat) if block_idx == 0 else feat
                    
                     if self.training:
-                        block_output = block_module[layer_idx][block_idx](feat) + identity
-                        feat = self.activation_function((policies[dset][block_count, 0] * block_output) + (policies[dset][block_count, 1] * identity))
+                        # block_output = block_module[layer_idx][block_idx](feat) + identity
+                        # feat = self.activation_function((policies[dset][block_count, 0] * block_output) + (policies[dset][block_count, 1] * identity))
+                        
+                        # Adashare Form
+                        block_output = self.activation_function(block_module[layer_idx][block_idx](feat) + identity)
+                        feat = (policies[dset][block_count, 0] * block_output) + (policies[dset][block_count, 1] * identity)
                         
                     else:
                         if policies[dset][block_count, 0]: feat = self.activation_function(block_module[layer_idx][block_idx](feat) + identity) 

@@ -44,6 +44,7 @@ class DDPStatic(nn.Module):
                  **kwargs
                  ) -> None:
         super().__init__()
+        kwargs['in_ddp_static'] = True
         self.task_single_network = nn.ModuleDict({
             data: SingleTaskNetwork(
                 backbone, detector, segmentor, data, cfg, **kwargs
@@ -181,9 +182,20 @@ class DDPStatic(nn.Module):
         else:
             new_grads = sum(grad for grad in origin_grad.values())
         
-        dist.all_reduce(new_grads)
-        new_grads /= dist.get_world_size()
+        # dist.all_reduce(new_grads)
+        # new_grads /= dist.get_world_size()
         
+        # print(new_grads)
+        # print(new_grads.norm())
+        # print(new_grads.)
+        
+        # if clip_grad is not None:
+        #     assert clip_grad is not None and isinstance(clip_grad, (float, int))
+        #     new_grads = torch.nn.utils.clip_grad_norm(new_grads, clip_grad)
+        
+        # print(new_grads)
+        # print(new_grads.norm())
+        # exit()
         if total_mean_grad: self._reset_grad(new_grads/len(origin_grad))
         else: self._reset_grad(new_grads)
         
@@ -192,8 +204,8 @@ class DDPStatic(nn.Module):
     
     def forward(self, data_dict, kwargs):
         if self.training:
-            output = self.task_single_network[kwargs['dataset']](data_dict)
-            losses = {f"{kwargs['dataset']}_{k}": v for k, v in output.items()}
+            losses = self.task_single_network[kwargs['dataset']](data_dict)
+            # losses = {f"{kwargs['dataset']}_{k}": v for k, v in output.items()}
             
         else:
             dset = list(kwargs["task_list"].keys())[0]

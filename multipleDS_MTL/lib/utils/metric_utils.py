@@ -3,6 +3,7 @@ import datetime
 import errno
 import os
 import time
+import numpy as np
 from collections import defaultdict, deque
 from collections import OrderedDict
 import torch
@@ -16,56 +17,369 @@ class ConfusionMatrix:
         self.mat = None
         self.mean_iou = 0.
         self.filter_cats = None
-        self.global_acc = 0.
+        self.pixel_acc = []
         self.acc = 0.
+        self.total_batch_size = []
         
         
-    def update(self, a, b):
+    def update(self, pred, targets):
         n = self.num_classes
         if self.mat is None:
-            self.mat = torch.zeros((n, n), dtype=torch.int64, device=a.device)
+            self.mat = torch.zeros((n, n), dtype=torch.int64, device=targets.device)
         with torch.inference_mode():
-            k = (a >= 0) & (a < n)
-            inds = n * a[k].to(torch.int64) + b[k]
+            k = (targets >= 0) & (targets < n)
+            inds = n * targets[k].to(torch.int64) + pred[k]
             self.mat += torch.bincount(inds, minlength=n ** 2).reshape(n, n)
+            
+            label = targets < n
+            gt = targets[label].int()
+            
+            pred = pred[label].int()
+            pixel_acc = (gt == pred).float().mean().cpu().numpy()
+            self.pixel_acc.append(pixel_acc)
+            
 
     def reset(self):
         self.mat.zero_()
+        self.pixel_acc = []
+
+    # def compute(self):
+    #     h = self.mat.float()
+    #     acc_global = torch.diag(h).sum() / h.sum()
+    #     acc = torch.diag(h) / h.sum(1)
+    #     iu = torch.diag(h) / (h.sum(1) + h.sum(0) - torch.diag(h))
+        
+    #     self.pixelAcc = (self.pixel_acc * torch.stack(self.total_batch_size)).sum() / sum(
+    #         self.total_batch_size)
+        
+    #     return acc_global, acc, iu, self.pixelAcc
 
     def compute(self):
+        torch.distributed.all_reduce(self.mat)
         h = self.mat.float()
-        # if self.filter_cats:
-        #     mask = []
-        #     for i in range(self.num_classes):
-        #         if not i in self.filter_cats:
-        #             mask.append(i)
-        #     # mask = torch.tensor(mask).cuda()
-        #     mask = torch.tensor(mask).to("cuda")
-        #     h = torch.index_select(h, 1, mask)
-        #     h = torch.index_select(h, 0, mask)
-            
-        acc_global = torch.diag(h).sum() / h.sum()
-        acc = torch.diag(h) / h.sum(1)
-        iu = torch.diag(h) / (h.sum(1) + h.sum(0) - torch.diag(h))
-        return acc_global, acc, iu
+        self.acc_global = torch.diag(h).sum() / h.sum()
+        self.acc = torch.diag(h) / h.sum(1)
+        self.iu = torch.diag(h) / (h.sum(1) + h.sum(0) - torch.diag(h))
+        self.mean_iou = self.iu.mean()
+        
+        self.pixel_acc = torch.from_numpy(np.array(self.pixel_acc)).cuda()
+        self.total_batch_size = torch.tensor(self.total_batch_size).cuda()
+        torch.distributed.all_reduce(self.pixel_acc)
+        torch.distributed.all_reduce(self.total_batch_size)
+        self.pixelAcc = (self.pixel_acc * self.total_batch_size).sum() / sum(
+            self.total_batch_size) / get_world_size()
+        
 
+    # def reduce_from_all_processes(self):
+    #     if not torch.distributed.is_available():
+    #         return
+    #     if not torch.distributed.is_initialized():
+    #         return
+    #     torch.distributed.barrier()
+    #     torch.distributed.all_reduce(self.mat)
+                
+    
+    def __str__(self):
+        return ("- Global Correct: {:.1f}\n\n- Average Row Correct: {}\n\n- IoU: {}\n- mean IoU: {:.1f}\n- Pixel Acc: {:.2f}").format(
+            self.acc_global.item() * 100,
+            [f"{i:.1f}" for i in (self.acc * 100).tolist()],
+            [f"{i:.1f}" for i in (self.iu * 100).tolist()],
+            self.mean_iou.item() * 100,
+            self.pixelAcc * 100
+        )
+     
+
+    # def __str__(self):
+    #     self.acc_global, self.acc, iu, self.pixelAcc = self.compute()
+    #     self.mean_iou = iu.mean().item() 
+    #     return ("- Global Correct: {:.1f}\n\n- Average Row Correct: {}\n\n- IoU: {}\n- mean IoU: {:.1f}\n- Pixel Acc: {:.2f}").format(
+    #         self.acc_global.item() * 100,
+    #         [f"{i:.1f}" for i in (self.acc * 100).tolist()],
+    #         [f"{i:.1f}" for i in (iu * 100).tolist()],
+    #         self.mean_iou * 100,
+    #         self.pixelAcc * 100
+    #     )
+
+
+class EdgeMetric:
+    def __init__(self):
+        self.abs_err = []
+        self.total_batch_size = []
+        self.lower_better = ['abs_err']
+    
+    
+    def update(self, pred, targets):
+        binary_mask = (targets != 255)
+        edge_output_true = pred.masked_select(binary_mask)
+        edge_gt_true = targets.masked_select(binary_mask)
+        abs_err = torch.abs(edge_output_true - edge_gt_true).mean()
+        self.abs_err.append(abs_err.cpu().numpy())
+        
+        
+    @property
+    def reset(self):
+        self.abs_err = []
+        
+    def compute(self):
+        self.abs_err = np.stack(self.abs_err, axis=0)
+        
+        val_metrics = {}
+        val_metrics['abs_err'] = (np.array(self.abs_err) * np.array(self.total_batch_size)).sum() / sum(self.total_batch_size)
+        self.val_metrics = val_metrics
+        
+    
     def reduce_from_all_processes(self):
         if not torch.distributed.is_available():
             return
         if not torch.distributed.is_initialized():
             return
+        
         torch.distributed.barrier()
-        torch.distributed.all_reduce(self.mat)
+        for k, value in self.val_metrics.items():
+            torch.distributed.all_reduce(torch.from_numpy(np.expand_dims(value, axis=0)).cuda())
+    
 
     def __str__(self):
-        self.acc_global, self.acc, iu = self.compute()
-        self.mean_iou = iu.mean().item() * 100
-        return ("- Global Correct: {:.1f}\n\n- Average Row Correct: {}\n\n- IoU: {}\n- mean IoU: {:.1f}").format(
-            self.acc_global.item() * 100,
-            [f"{i:.1f}" for i in (self.acc * 100).tolist()],
-            [f"{i:.1f}" for i in (iu * 100).tolist()],
-            self.mean_iou,
-        )
+        info = ""
+        for mtype, value in self.val_metrics.items():
+            info += f" - (Lower Better) {mtype.upper()}: {round(float(value), 3)}\n"
+        return info
+
+
+
+class KeypointMetric:
+    def __init__(self):
+        self.abs_err = []
+        self.total_batch_size = []
+        self.lower_better = ['abs_err']
+        
+    
+    def update(self, pred, targets):
+        binary_mask = (targets != 255)
+        keypoint_output_true = pred.masked_select(binary_mask)
+        keypoint_gt_true = targets.masked_select(binary_mask)
+        abs_err = torch.abs(keypoint_output_true - keypoint_gt_true).mean()
+        self.abs_err.append(abs_err.cpu().numpy())
+        
+        
+    @property
+    def reset(self):
+        self.abs_err = []
+        self.total_batch_size = []
+        
+    def compute(self):
+        self.abs_err = np.stack(self.abs_err, axis=0)
+        
+        val_metrics = {}
+        val_metrics['abs_err'] = (np.array(self.abs_err) * np.array(self.total_batch_size)).sum() / sum(self.total_batch_size)
+        self.val_metrics = val_metrics
+        
+    
+    def reduce_from_all_processes(self):
+        if not torch.distributed.is_available():
+            return
+        if not torch.distributed.is_initialized():
+            return
+        
+        torch.distributed.barrier()
+        for k, value in self.val_metrics.items():
+            torch.distributed.all_reduce(torch.from_numpy(np.expand_dims(value, axis=0)).cuda())
+    
+
+    def __str__(self):
+        info = ""
+        for mtype, value in self.val_metrics.items():
+            info += f" - (Lower Better) {mtype.upper()}: {round(float(value), 3)}\n"
+        return info     
+
+
+class DepthMetric:
+    def __init__(self, dataset):
+        self.abs_err = []
+        self.rel_err = []
+        self.sq_rel_err = []
+        self.ratio = []
+        self.rms = []
+        self.rms_log = []
+        self.total_batch_size = []
+        self.dataset = dataset
+        
+        self.lower_better = ['abs_err', 'rel_err', 'sq_rel_err']
+        self.higher_better = ['sigma_1.25', 'sigma_1.25^2', 'sigma_1.25^3']
+    
+    
+    def update(self, pred, targets):
+        if self.dataset in ["nyuv2", "cityscapes"]:
+            binary_mask = (torch.sum(targets, dim=1) > 3 * 1e-5).unsqueeze(1).cuda()
+        elif self.dataset == 'taskonomy' and "mask" in targets:
+            assert targets["mask"] is not None
+            binary_mask = (targets["gt"] != 255) * (targets["mask"].int() == 1)
+            targets = targets["gt"]
+        
+        depth_output_true = pred.masked_select(binary_mask)
+        depth_gt_true = targets.masked_select(binary_mask)
+        abs_err = torch.abs(depth_output_true - depth_gt_true)
+        rel_err = torch.abs(depth_output_true - depth_gt_true) / depth_gt_true
+        sq_rel_err = torch.pow(depth_output_true - depth_gt_true, 2) / depth_gt_true
+        abs_err = torch.sum(abs_err) / torch.nonzero(binary_mask).size(0)
+        rel_err = torch.sum(rel_err) / torch.nonzero(binary_mask).size(0)
+        sq_rel_err = torch.sum(sq_rel_err) / torch.nonzero(binary_mask).size(0)
+        # calcuate the sigma
+        term1 = depth_output_true / depth_gt_true
+        term2 = depth_gt_true / depth_output_true
+        ratio = torch.max(torch.stack([term1, term2], dim=0), dim=0)
+        # calcualte rms
+        rms = torch.pow(depth_output_true - depth_gt_true, 2)
+        rms_log = torch.pow(torch.log10(depth_output_true + 1e-7) - torch.log10(depth_gt_true + 1e-7), 2)
+        
+        self.abs_err.append(abs_err.cpu().numpy())
+        self.rel_err.append(rel_err.cpu().numpy())
+        self.sq_rel_err.append(sq_rel_err.cpu().numpy())
+        self.ratio.append(ratio[0].cpu().numpy())
+        self.rms.append(rms.cpu().numpy())
+        self.rms_log.append(rms_log.cpu().numpy())
+        
+        
+    @property
+    def reset(self):
+        self.abs_err = []
+        self.rel_err = []
+        self.sq_rel_err = []
+        self.ratio = []
+        self.rms = []
+        self.rms_log = []
+        self.total_batch_size = []
+        
+    def compute(self):
+        self.abs_err = np.stack(self.abs_err, axis=0)
+        self.rel_err = np.stack(self.rel_err, axis=0)
+        # self.sq_rel_err = np.stack(self.sq_rel_err, axis=0)
+        self.ratio = np.concatenate(self.ratio, axis=0)
+        self.rms = np.concatenate(self.rms, axis=0)
+        self.rms_log = np.concatenate(self.rms_log, axis=0)
+        self.rms_log = self.rms_log[~np.isnan(self.rms_log)]
+        
+        val_metrics = {}
+        val_metrics['abs_err'] = (self.abs_err * np.array(self.total_batch_size)).sum() / sum(self.total_batch_size)
+        val_metrics['rel_err'] = (self.rel_err * np.array(self.total_batch_size)).sum() / sum(self.total_batch_size)
+        # val_metrics['sq_rel_err'] = (self.sq_rel_err * np.array(self.total_batch_size)).sum() / sum(self.total_batch_size)
+        val_metrics['sigma_1.25'] = np.mean(np.less_equal(self.ratio, 1.25)) * 100
+        val_metrics['sigma_1.25^2'] = np.mean(np.less_equal(self.ratio, 1.25 ** 2)) * 100
+        val_metrics['sigma_1.25^3'] = np.mean(np.less_equal(self.ratio, 1.25 ** 3)) * 100
+        # val_metrics['rms'] = (np.sum(self.rms) / len(self.rms)) ** 0.5
+        # val_metrics['rms_log'] = (np.sum(self.rms_log) / len(self.rms_log)) ** 0.5
+        
+        self.val_metrics = val_metrics
+        
+    
+    def reduce_from_all_processes(self):
+        if not torch.distributed.is_available():
+            return
+        if not torch.distributed.is_initialized():
+            return
+        
+        
+        torch.distributed.barrier()
+        for k, value in self.val_metrics.items():
+            torch.distributed.all_reduce(torch.from_numpy(np.expand_dims(value, axis=0)).cuda())
+    
+
+    def __str__(self):
+        max_len = 0
+        for k in self.val_metrics.keys():
+            if len(k) > max_len: max_len = len(k)
+        
+        info = ""
+        for mtype, value in self.val_metrics.items():
+            name = mtype.upper() + " " * (max_len - len(mtype))
+            if mtype in self.higher_better:
+                degree_type = "(Hihger Better)"
+            elif mtype in self.lower_better:
+                degree_type = "( Lower Better)"
+            
+            info += f" - {degree_type} {name}: {round(float(value), 3)}\n"
+        
+        return info            
+            
+
+class SurfaceNormalMetric:
+    def __init__(self):
+        self.cos_sim = []
+        self.cosine_similarity = torch.nn.CosineSimilarity()
+        self.normalize = torch.nn.functional.normalize
+        
+        self.lower_better = ['angle_mean', 'angle_median']
+        self.higher_better = ['angle_11.25', 'angle_22.5', 'angle_30']
+    
+    
+    def update(self, pred, targets):
+        prediction = pred.permute(0, 2, 3, 1).contiguous().view(-1, 3)
+        gt = targets.permute(0, 2, 3, 1).contiguous().view(-1, 3)
+
+        labels = gt.max(dim=1)[0] != 255
+        # if hasattr(self, 'normal_mask'):
+        #     gt_mask = self.normal_mask.permute(0, 2, 3, 1).contiguous().view(-1, 3)
+        #     labels = labels and gt_mask.int() == 1
+
+        gt = gt[labels]
+        prediction = prediction[labels]
+
+        gt = self.normalize(gt.float(), dim=1)
+        prediction = self.normalize(prediction, dim=1)
+
+        cos_similarity = self.cosine_similarity(gt, prediction)
+        self.cos_sim.append(cos_similarity.cpu().numpy())
+        
+    @property
+    def reset(self):
+        self.cos_sim = []
+        
+        
+    def compute(self):
+        val_metrics = {}
+        overall_cos = np.clip(np.concatenate(self.cos_sim), -1, 1)
+
+        angles = np.arccos(overall_cos) / np.pi * 180.0
+        # val_metrics['cosine_similarity'] = overall_cos.mean()
+        val_metrics['angle_mean'] = np.mean(angles)
+        val_metrics['angle_median'] = np.median(angles)
+        # val_metrics['Angle RMSE'] = np.sqrt(np.mean(angles ** 2))
+        val_metrics['angle_11.25'] = np.mean(np.less_equal(angles, 11.25)) * 100
+        val_metrics['angle_22.5'] = np.mean(np.less_equal(angles, 22.5)) * 100
+        val_metrics['angle_30'] = np.mean(np.less_equal(angles, 30.0)) * 100
+        # val_metrics['Angle 45'] = np.mean(np.less_equal(angles, 45.0)) * 100
+        
+        self.val_metrics = val_metrics
+        
+    
+    def reduce_from_all_processes(self):
+        if not torch.distributed.is_available():
+            return
+        if not torch.distributed.is_initialized():
+            return
+        
+        torch.distributed.barrier()
+        for k, value in self.val_metrics.items():
+            torch.distributed.all_reduce(torch.from_numpy(np.expand_dims(value, axis=0)).cuda())
+    
+
+    def __str__(self):
+        max_len = 0
+        for k in self.val_metrics.keys():
+            if len(k) > max_len: max_len = len(k)
+        
+        info = ""
+        for mtype, value in self.val_metrics.items():
+            name = mtype.upper() + " " * (max_len - len(mtype))
+            if mtype in self.higher_better:
+                degree_type = "(Hihger Better)"
+            elif mtype in self.lower_better:
+                degree_type = "( Lower Better)"
+                
+            info += f" - {degree_type} {name}: {round(float(value), 3)}\n"
+        
+        return info            
+
 
 
 
@@ -400,9 +714,18 @@ def extract_batch(loaders, train_mode=True, return_count=False):
 
 def preprocess_data(batch_set, tasks, device="cuda"):
     def general_preprocess(batches):
-        return batches[0].to(device), batches[1].to(device) 
+        return batches[0].to(device), batches[1].to(device)
     
     
+    def multitask_preprocess(batches):
+        for task in batches[1].keys():
+            if isinstance(batches[1][task], dict):
+                batches[1][task] = {t_name: t.to(device) for t_name, t in batches[1][task].items()}
+            else:
+                batches[1][task] = batches[1][task].to(device)
+        return batches[0].to(device), batches[1]
+        
+        
     def coco_preprocess(batches):
         # images = list(image.cuda() for image in batches[0])
         images = list(image.to(device) for image in batches[0])
@@ -416,14 +739,13 @@ def preprocess_data(batch_set, tasks, device="cuda"):
         if task == 'clf':
             data_dict[dset] = general_preprocess(data)
         
-        elif task =='det' or task == 'seg':
+        elif task =='det':
             if 'coco' in dset:
                 data_dict[dset] = coco_preprocess(data)
-                
-            else:
-                data_dict[dset] = general_preprocess(data)
         
-    
+        elif task == 'seg':
+            data_dict[dset] = multitask_preprocess(data)
+            
     return data_dict
 
 
@@ -623,7 +945,7 @@ def save_parser(args, path, filename='parser.json', format='json'):
             json.dump(args, f, indent=2)
 
 
-def set_random_seed(seed, deterministic=False, device='cuda'):
+def set_random_seed(seed=None, deterministic=False, device='cuda'):
     """Set random seed.
 
     Args:
@@ -633,39 +955,39 @@ def set_random_seed(seed, deterministic=False, device='cuda'):
             to True and `torch.backends.cudnn.benchmark` to False.
             Default: False.
     """
-    import random
-    import numpy as np
-    def _set_seed(seed):
-        if seed is None:
-            seed = torch.initial_seed()
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        # if deterministic:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        torch.backends.cudnn.enabled = True
-    
-    rank, world_size = get_rank(), get_world_size()
-    # if seed is None:
-    #     seed = np.random.randint(2**31)
-    # else:
-    #     seed = seed + rank
-    #     # seed = seed
-    seed = seed + rank 
-    if world_size == 1:
-        return seed
+    # import random
+    # import numpy as np
         
-    random_num = torch.tensor(seed, dtype=torch.int32, device=device)
-    # dist.broadcast(random_num, src=0)
-    seed = random_num.item()
-    _set_seed(seed)
+    # rank, world_size = get_rank(), get_world_size()
+    # # if seed is None:
+    # #     seed = np.random.randint(2**31)
+    # # else:
+    # #     seed = seed + rank
+    # #     # seed = seed
+    # # seed = seed + rank 
     
-    return seed
+    # seed = sum(s for s in range(world_size))
     
+    # if world_size == 1:
+    #     return seed
+    # print(seed)
+    
+    # random.seed(seed)
+    # np.random.seed(seed)
+    # torch.manual_seed(seed)
+    # torch.cuda.manual_seed(seed)
+    # torch.cuda.manual_seed_all(seed)
+    # # if deterministic:
+    # torch.backends.cudnn.deterministic = True
+    # torch.backends.cudnn.benchmark = False
+    # torch.backends.cudnn.enabled = False
     # return seed
+    
+    seed = seed + get_rank()
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.benchmark = False
+    
 
 def reduce_across_processes(val):
     if not is_dist_avail_and_initialized():
@@ -690,44 +1012,50 @@ def get_mtl_performance(single, multi):
     
     return delta_perf
 
-
-
     
-    # a = 0
-    # print("here")
-    # if len(ds_keys) > 1:
-    #     print("here2")
-    #     for data in loader_lists[0]:
-    #         print("here3")
-    #         return_dict[ds_keys[0]] = data
-            
-    #         for data_list in zip(*loader_lists[1:]):
-    #             try:
-    #                 dicts = {ds_keys[i+1]:data for (i, data) in enumerate(data_list)}
-                    
-    #             except StopIteration:
-    #                 print("StopIteration")
-    #                 print("---"*60)
-    #                 print(dicts)
-    #                 for k, v in dicts.items():
-    #                     if v is None:
-    #                         key_idx = ds_keys.index(k)
-    #                         loader_lists[key_idx] = iter(loader_lists[key_idx])
-    #                         dicts[k] = next(loader_lists[key_idx])
-                            
-    #                 print(dicts)
-    #                 exit()
-                    
+def load_seg_referneces(dataset):   
+    seg_references = {
+        'voc':{
+            "sseg":{
+                "mIoU": 0.901,
+                "pixel_acc": 0.979
+            }},
+        
+        'nyuv2': {
+            "sseg":{
+                "mIoU": 0.363,
+                "pixel_acc": 0.669
+                },
+            'depth': {
+                # 'abs_err_low': 0.54,
+                # 'rel_err_low': 0.21,
+                # 'sigma_1.25': 64.2,
+                # 'sigma_1.25^2': 89.7,
+                # 'sigma_1.25^3': 97.7},
+                
+                # scores from training with pretrained weight
+                'abs_err_low': 0.507,
+                'rel_err_low': 0.202,
+                'sigma_1.25': 66.83,
+                'sigma_1.25^2': 91.71,
+                'sigma_1.25^3': 98.3},
+                
+            'sn': {
+                # 'angle_mean_low': 0.151,
+                # 'angle_median_low': 0.116,
+                # 'angle_11.25': 48.6,
+                # 'angle_22.5': 76.8,
+                # 'angle_30': 88.3}
+                
+                # encBias_bs4_scrat200E_SN_warm12_BN
+                'angle_mean_low': 15.7,
+                'angle_median_low': 12.7,
+                'angle_11.25': 45.0,
+                'angle_22.5': 76.0,
+                'angle_30': 88.8}
+            }
+        }
 
-    #             return_dict.update(dicts)
-    #             yield return_dict
-
-    # if len(ds_keys) == 1 and (not train_mode):
-    #     task = keys.pop()
-    #     for data in loaders[task]:
-    #         yield dict(task=data)
+    assert dataset in seg_references
     
-    # if len(ds_keys) == 2:
-    #     if 'clf' in keys and 'det' in keys:
-    #         for clf_, det_ in zip(loaders['clf'], loaders['det']):
-    #             yield dict(clf=clf_, det=det_)
+    return seg_references[dataset]

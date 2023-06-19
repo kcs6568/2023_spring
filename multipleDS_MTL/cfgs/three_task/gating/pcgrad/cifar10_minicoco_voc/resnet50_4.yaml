@@ -9,8 +9,8 @@ segmentor: 'fcn'
 use_minids: True
 
 state_dict: 
-  stem: /root/volume/23_spring/mdmtl/pretrained_weights/resnet50_IM1K_dense_stem.pth
-  backbone: /root/volume/23_spring/mdmtl/pretrained_weights/resnet50_IM1K_body.pth
+  stem: /root/volume/pretrained_weights/resnet50_IM1K_dense_stem.pth
+  backbone: /root/volume/pretrained_weights/resnet50_IM1K_body.pth
   # stem: null
   # backbone: null
 

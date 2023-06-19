@@ -7,6 +7,8 @@ def set_activation_function(activation_type):
         return nn.ReLU(inplace=True)
     elif activation_type == 'leakyrelu':
         return nn.LeakyReLU(inplace=True)
+    elif activation_type == 'prelu':
+        return nn.PReLU(device='cuda')
     elif activation_type == 'relu6':
         return nn.ReLU6(inplace=True)
     elif activation_type == 'tanh':

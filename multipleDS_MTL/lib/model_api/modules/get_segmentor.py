@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from ...apis.loss_lib import get_loss_fn
+
 
 class SegStem(nn.Module):
     def __init__(self,
@@ -20,8 +22,8 @@ class SegStem(nn.Module):
         self.bn = nn.BatchNorm2d(out_channels)
         
         if stem_weight is not None:
-            ckpt = torch.load(stem_weight, map_location='cpu')
-            self.load_state_dict(ckpt)
+            # ckpt = torch.load(stem_weight, map_location='cpu')
+            self.load_state_dict(stem_weight, strict=False)
             print("!!!Load weights for segmentation stem layer!!!")
         
         self.activation = activation_function
@@ -46,77 +48,185 @@ class SegStem(nn.Module):
         return x
 
 
+def make_fcn_head(in_channels, inter_channels, dropout_ratio, num_classes, activation, bias=False):
+    layers = [
+        nn.Conv2d(in_channels, inter_channels, 3, padding=1, bias=bias),
+        nn.BatchNorm2d(inter_channels),
+        activation,
+        nn.Dropout(dropout_ratio),
+        nn.Conv2d(inter_channels, num_classes, 1, bias=bias)
+    ]
+    
+    return nn.Sequential(*layers)
 
-class FCNHead(nn.Module):
-    def __init__(self, in_channels=2048, inter_channels=None, aux_ratio=0.5,
-                 num_classes=21, use_aux=True, aux_channel=None, num_skip_aux=1, dropout_ratio=0.1,
-                 activation_function=nn.ReLU(inplace=True)) -> None:
-        super(FCNHead, self).__init__()
-        inter_channels = in_channels // 4 if inter_channels is None else inter_channels
-        self.dropout_ratio = dropout_ratio
-        self.fcn_head = self._make_fcn_head(in_channels, inter_channels, num_classes, activation_function)
-        self.interplation = nn.Upsample()
-        self.aux_ratio = float(aux_ratio)
+
+class SegAbsHead(object):
+    def __init__(self) -> None:
+        pass
+    
+    
+    def compute_losses(self):
+        pass
+
+
+class DeepLapHead(nn.Module):
+    # def __init__(self, inplanes, num_classes, rate=12):
+    def __init__(self, num_classes, dataset, rate, in_channels=2048, dropout_ratio=0.5,
+                 activation_function=nn.ReLU(inplace=True)):
+        super(DeepLapHead, self).__init__()
+        self.activation_function = activation_function
+        self.tasks = list(num_classes.keys())
+        self.rate_num = len(rate)
+
+        # out_channels = in_channels
+        out_channels = in_channels * 2
         
-        if use_aux:
-            '''
-            get aux feature at the specific location (if this value is 1, the popitem() operation will be operated once)
-            '''
-            self.num_skip_aux = num_skip_aux 
-            aux_inchannels = in_channels // 2 if aux_channel is None else aux_channel
-            self.aux_head = self._make_fcn_head(aux_inchannels, aux_inchannels//4, num_classes, activation_function)
+        for task, num_class in num_classes.items():
+            is_group = True if in_channels == out_channels else False
+            for t_id, r in enumerate(rate):
+                setattr(self, f"{task}_{t_id}", self._make_deeplab_head(in_channels, out_channels, 
+                                          dropout_ratio, r, num_class, is_group))
+        
+        # nn.ModuleDict({
+        #     task: self._make_deeplab_head(in_channels, out_channels, 
+        #                                   dropout_ratio, rate, num_class) for task, num_class in num_classes.items()
+        # })
+        
+        
+        # self.head = nn.ModuleDict({
+        #     task: self._make_deeplab_head(in_channels, out_channels, 
+        #                                   dropout_ratio, rate, num_class) for task, num_class in num_classes.items()
+        # })
+        
+        # self.conv1 = nn.Conv2d(in_channels, outplanes, kernel_size=3, stride=1, padding=rate, dilation=rate, bias=True)
+        # self.conv2 = nn.Conv2d(outplanes, outplanes, kernel_size=1)
+        # self.conv3 = nn.Conv2d(outplanes, num_classes, kernel_size=1)
+        # 
+        # self.dropout = nn.Dropout(dropout_ratio)
+        
+        self.loss_fn = {task: get_loss_fn(dataset, task) for task in num_classes.keys()}
+
+    
+    def _make_deeplab_head(self, in_channels, out_channels, drop_ratio, rate, num_classes, is_group=False):
+        if is_group:
+            assert in_channels == out_channels
+            group_size = in_channels
+        else:
+            group_size = 1
             
-        # if loss_fn == 'ce':
-        #     self.loss_fn = self.ce_loss
-        # elif loss_fn == 'dice':
-        #     from ...apis.loss_lib import DiceLoss
-        #     self.criterion = DiceLoss()
-            
-    def _make_fcn_head(self, in_channels, inter_channels, num_classes, activation):
-        layers = [
-            nn.Conv2d(in_channels, inter_channels, 3, padding=1, bias=False),
-            nn.BatchNorm2d(inter_channels),
-            activation,
-            nn.Dropout(self.dropout_ratio),
-            nn.Conv2d(inter_channels, num_classes, 1)
-        ]
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, groups=group_size, padding=rate, dilation=rate, bias=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=1),
+            nn.Conv2d(out_channels, num_classes, kernel_size=1),
+            self.activation_function,
+            nn.Dropout(drop_ratio),
+        )
         
-        return nn.Sequential(*layers)
-
-
-    def criterion(self, inputs, target):
-        losses = {}
-        
-        for name, x in inputs.items():
-            losses[name] = F.cross_entropy(x, target, ignore_index=255)
-            if 'aux' in name: losses[name] *= self.aux_ratio
-        
-        # if "seg_aux_loss" in losses:
-        #     losses["seg_aux_loss"] *= self.aux_ratio
-         
-        return losses
-        
-
+    
     def forward(self, feats, target=None, input_shape=480):
         assert isinstance(feats, dict) or isinstance(feats, OrderedDict)
-        results = OrderedDict()
-        _, x = feats.popitem()
-        x = self.fcn_head(x)
+        all_losses = {}
         
-        x = nn.Upsample(size=input_shape, mode='bilinear', align_corners=False)(x)
-        results["seg_out_loss"] = x
+        _, x = feats.popitem()
+        
+        outputs = {}
+        for task in self.tasks:
+            t_out = None
+            for t_id in range(self.rate_num):
+                if t_out is None:
+                    t_out = getattr(self, f"{task}_{t_id}")(x)
+                else:
+                    t_out += getattr(self, f"{task}_{t_id}")(x)
+                    
+            outputs[task] = t_out
+                    
+        
+        # outputs = {task: head(x) for task, head in self.head.items()}
         
         if self.training:
-            if self.aux_head is not None:
-                for _ in range(self.num_skip_aux):
-                    _, x = feats.popitem()
-                x = self.aux_head(x)
-                x = nn.Upsample(size=input_shape, mode='bilinear', align_corners=False)(x)
-                results["seg_aux_loss"] = x
-            return self.criterion(results, target)
+            for task, seg_out in outputs.items():
+                resized = nn.Upsample(size=input_shape, mode='bilinear', align_corners=False)(seg_out)
+                all_losses.update({f"{task}_loss": self.loss_fn[task].compute_loss(resized, target[task])})
+                
+            return all_losses
 
         else:
-            return results["seg_out_loss"]
+            outputs.update({task: nn.Upsample(
+                size=input_shape, mode='bilinear', align_corners=False)(out) for task, out in outputs.items()})
+            return outputs
+         
+         
+        
+        
+        
+class FCNHead(nn.Module):
+    def __init__(self, num_classes, dataset, in_channels=2048, inter_channels=None, 
+                 aux_ratio=0.5, use_aux=True, aux_channel=None, dropout_ratio=0.1,
+                 bias=False, activation_function=nn.ReLU(inplace=True)) -> None:
+        super(FCNHead, self).__init__()
+        inter_channels = in_channels // 4 if inter_channels is None else inter_channels
+        self.task_list = list(num_classes.keys())
+        
+        task_bias = {t: bias for t in self.task_list}
+        task_use_aux = {t: use_aux for t in self.task_list}
+        task_dropout_ratio = {t: dropout_ratio for t in self.task_list}
+        
+        # if bias is None:
+        #     bias = {task: False for task in num_classes.keys()}
+        # if use_aux is None:
+        #     use_aux = {task: False for task in num_classes.keys()}
+        # if dropout_ratio is None:
+        #     dropout_ratio = {task: 0.1 for task in num_classes.keys()}
+        
+        self.fcn_head = nn.ModuleDict({
+            task: make_fcn_head(in_channels, inter_channels, task_dropout_ratio[task], num_class, 
+                                activation_function, task_bias[task]) for task, num_class in num_classes.items()
+                })
+        
+        self.aux_head = {}
+        for task, aux in task_use_aux.items():
+            self.aux_ratio = float(aux_ratio)
+            
+            if aux:
+                aux_inchannels = in_channels // 2 if aux_channel is None else aux_channel
+                self.aux_head[task] = make_fcn_head(aux_inchannels, aux_inchannels//4, task_dropout_ratio[task], num_classes[task], 
+                                        activation_function, task_bias[task])
+        
+        if len(self.aux_head) > 0:
+            self.aux_head = nn.ModuleDict(self.aux_head)
+        
+        self.loss_fn = {task: get_loss_fn(dataset, task) for task in num_classes.keys()}
+        
+            
+    
+    def forward(self, feats, target=None, input_shape=480):
+        assert isinstance(feats, dict) or isinstance(feats, OrderedDict)
+        all_losses = {}
+        
+        _, x = feats.popitem()
+        
+        seg_outputs = {task: head(x) for task, head in self.fcn_head.items()}
+        
+        if self.training:
+            for task, seg_out in seg_outputs.items():
+                fcn_resized = nn.Upsample(size=input_shape, mode='bilinear', align_corners=False)(seg_out)
+                all_losses.update({f"{task}_out_loss": self.loss_fn[task].compute_loss(fcn_resized, target[task])})
+                
+            # if self.aux_head is not None:
+            if len(self.aux_head) > 0:
+                _, x = feats.popitem()
+                
+                aux_outputs = {task: head(x) for task, head in self.aux_head.items()}
+                for task, aux_out in aux_outputs.items():
+                    aux_resized = nn.Upsample(size=input_shape, mode='bilinear', align_corners=False)(aux_out)
+                    all_losses.update({f"{task}_aux_loss": self.loss_fn[task].compute_loss(aux_resized, target[task], is_aux=True)})
+            
+            return all_losses
+
+        else:
+            seg_outputs.update({task: nn.Upsample(
+                size=input_shape, mode='bilinear', align_corners=False)(seg_out) for task, seg_out in seg_outputs.items()})
+            return seg_outputs
         
 
 def build_segmentor(
@@ -156,10 +266,15 @@ def build_segmentor(
 
     else:
         if 'fcn' in segmentor_name:
+            # if "num_task" in cfg_dict:
+            #     num_head = cfg_dict['num_task']
+            # else:
+            #     head = FCNHead(num_classes=num_classes, **cfg_dict)
+                
             head = FCNHead(num_classes=num_classes, **cfg_dict)
         
-        elif 'deeplab' in segmentor_name:
-            head = None    
+        elif 'deeplap' in segmentor_name:
+            head = DeepLapHead(num_classes=num_classes, **cfg_dict)
         
         return head
     

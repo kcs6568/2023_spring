@@ -1,0 +1,89 @@
+setup: 'single_task'
+method: 'baseline'
+approach: 'static'
+
+backbone: 'resnet50'
+detector: null
+# segmentor: 'fcn'
+segmentor: 'deeplap'
+
+use_minids: False
+
+state_dict: 
+  # stem: /root/volume/pretrained_weights/resnet50_IM1K_dense_stem.pth
+  # backbone: /root/volume/pretrained_weights/resnet50_IM1K_body.pth
+  stem: null
+  backbone: null
+
+task_cfg:
+  cityscapes:
+    task: 'seg'
+    num_classes: 
+      sseg: 19
+      depth: 1
+    crop_h: 321
+    crop_w: 321
+    small_res: False
+    stem:
+      kernel_size: 7
+      stride: 2
+      padding: 3
+    head:
+      in_channels: 2048
+      rate: [6, 12, 18, 24]
+    return_layers: ['3']
+
+  # cityscapes:
+  #   task: 'seg'
+  #   num_classes: 
+  #     sseg: 19
+  #     depth: 1
+  #   crop_h: 224
+  #   crop_w: 224
+  #   small_res: False
+  #   stem:
+  #     kernel_size: 7
+  #     stride: 2
+  #     padding: 3
+  #   head:
+  #     in_channels: 2048
+  #     bias:
+  #       sseg: True
+  #       depth: True
+  #     use_aux:
+  #       sseg: True
+  #       depth: True
+  #   return_layers: ['2', '3']
+
+task_bs: 
+  - 2
+
+lr_config: 
+  type: step
+  step_size: 12
+  gamma: 0.5
+  lr: 0.0001
+
+baseline_args:
+  backbone_type: intermediate
+  dilation_type: ftt
+  freeze_bn: False
+  train_allbackbone: True
+  freeze_backbone: False
+  bottleneck_type: default
+activation_function: relu
+
+loss_ratio:
+  cityscapes_sseg: 0.05
+  cityscapes_depth: 1
+
+total_mean_grad: False
+task_balancing:
+  grad_method: null
+  weight_method: null
+
+epochs: 65
+print_freq: 20
+
+
+

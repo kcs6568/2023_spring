@@ -92,15 +92,15 @@ class DetStem(nn.Module):
         bn = misc_nn_ops.FrozenBatchNorm2d if freeze_bn else nn.BatchNorm2d
         self.bn = bn(out_channels)
         self.activation = activation_function
-            
+        
         if use_maxpool:
             self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
         else:
             self.maxpool = None
         
         if stem_weight is not None:
-            ckpt = torch.load(stem_weight, map_location='cpu')
-            self.load_state_dict(ckpt)
+            # ckpt = torch.load(stem_weight, map_location='cpu')
+            self.load_state_dict(stem_weight, strict=False)
             print("!!!Load weights for detection stem layer!!!")
         
         if image_mean is None:
@@ -163,11 +163,12 @@ class FasterRCNN(nn.Module):
             rpn_anchor_generator = AnchorGenerator(
                 anchor_sizes, aspect_ratios
             )
-        
+        use_bias = kwargs["bias"]
         activation_function = kwargs['activation_function']
         if rpn_head is None:
             rpn_head = RPNHead(
-                out_channels, rpn_anchor_generator.num_anchors_per_location()[0], activation_function=activation_function
+                out_channels, rpn_anchor_generator.num_anchors_per_location()[0], 
+                activation_function=activation_function, use_bias=use_bias
             )
 
         rpn_pre_nms_top_n = dict(training=rpn_pre_nms_top_n_train, testing=rpn_pre_nms_top_n_test)
@@ -191,13 +192,13 @@ class FasterRCNN(nn.Module):
             representation_size = 1024
             box_head = TwoMLPHead( # same as fast-rcnn
                 out_channels * resolution ** 2,
-                representation_size, activation_function=activation_function)
+                representation_size, activation_function=activation_function, use_bias=use_bias)
             
         if box_predictor is None:
             representation_size = 1024
             box_predictor = FastRCNNPredictor( # same as fast-rcnn
                 representation_size,
-                num_classes)
+                num_classes, use_bias=use_bias)
 
         self.roi_heads = RoIHeads(
             # Box
@@ -304,11 +305,11 @@ class TwoMLPHead(nn.Module):
         representation_size (int): size of the intermediate representation
     """
 
-    def __init__(self, in_channels, representation_size, activation_function):
+    def __init__(self, in_channels, representation_size, activation_function, use_bias):
         super(TwoMLPHead, self).__init__()
 
-        self.fc6 = nn.Linear(in_channels, representation_size)
-        self.fc7 = nn.Linear(representation_size, representation_size)
+        self.fc6 = nn.Linear(in_channels, representation_size, bias=use_bias)
+        self.fc7 = nn.Linear(representation_size, representation_size, bias=use_bias)
         self.activation = activation_function
 
     def forward(self, x):
@@ -330,10 +331,10 @@ class FastRCNNPredictor(nn.Module):
         num_classes (int): number of output classes (including background)
     """
 
-    def __init__(self, in_channels, num_classes):
+    def __init__(self, in_channels, num_classes, use_bias):
         super(FastRCNNPredictor, self).__init__()
-        self.cls_score = nn.Linear(in_channels, num_classes)
-        self.bbox_pred = nn.Linear(in_channels, num_classes * 4)
+        self.cls_score = nn.Linear(in_channels, num_classes, bias=use_bias)
+        self.bbox_pred = nn.Linear(in_channels, num_classes * 4, bias=use_bias)
 
 
     def forward(self, x):
@@ -355,18 +356,18 @@ class RPNHead(nn.Module):
         num_anchors (int): number of anchors to be predicted
     """
 
-    def __init__(self, in_channels, num_anchors, activation_function):
+    def __init__(self, in_channels, num_anchors, activation_function, use_bias):
         super(RPNHead, self).__init__()
         self.conv = nn.Conv2d(
-            in_channels, in_channels, kernel_size=3, stride=1, padding=1
-        )
-        self.cls_logits = nn.Conv2d(in_channels, num_anchors, kernel_size=1, stride=1)
+            in_channels, in_channels, kernel_size=3, stride=1, padding=1, bias=use_bias)
+        self.cls_logits = nn.Conv2d(in_channels, num_anchors, kernel_size=1, stride=1, bias=use_bias)
         self.bbox_pred = nn.Conv2d(
-            in_channels, num_anchors * 4, kernel_size=1, stride=1
+            in_channels, num_anchors * 4, kernel_size=1, stride=1, bias=use_bias
         )
         for layer in self.children():
             torch.nn.init.normal_(layer.weight, std=0.01)
-            torch.nn.init.constant_(layer.bias, 0)
+            if use_bias:
+                torch.nn.init.constant_(layer.bias, 0)
             
         self.activation = activation_function
             

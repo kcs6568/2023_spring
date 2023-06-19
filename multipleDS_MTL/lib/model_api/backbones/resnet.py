@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Type, Any, Callable, Union, List, Optional
 
 import torch
@@ -5,10 +6,35 @@ import torch.nn as nn
 import torchvision
 from torch import Tensor
 
+from torchvision.ops import misc as misc_nn_ops
+from torchvision.transforms._presets import ImageClassification
+from torchvision.models._meta import _IMAGENET_CATEGORIES
+from torchvision.models._api import WeightsEnum, Weights
+from torchvision.models._utils import handle_legacy_interface, _ovewrite_named_param
 
-__all__ = ['ResNet', 'resnet18', 'resnet34', 'resnet50', 'resnet101',
-           'resnet152', 'resnext50_32x4d', 'resnext101_32x8d',
-           'wide_resnet50_2', 'wide_resnet101_2']
+__all__ = [
+    "ResNet",
+    "ResNet18_Weights",
+    "ResNet34_Weights",
+    "ResNet50_Weights",
+    "ResNet101_Weights",
+    "ResNet152_Weights",
+    "ResNeXt50_32X4D_Weights",
+    "ResNeXt101_32X8D_Weights",
+    "ResNeXt101_64X4D_Weights",
+    "Wide_ResNet50_2_Weights",
+    "Wide_ResNet101_2_Weights",
+    "resnet18",
+    "resnet34",
+    "resnet50",
+    "resnet101",
+    "resnet152",
+    "resnext50_32x4d",
+    "resnext101_32x8d",
+    "resnext101_64x4d",
+    "wide_resnet50_2",
+    "wide_resnet101_2",
+]
 
 
 class DeformableConv2d(nn.Module):
@@ -76,20 +102,21 @@ class DeformableConv2d(nn.Module):
 
 
 
-def conv3x3(in_planes: int, out_planes: int, stride: int = 1, groups: int = 1, dilation: int = 1, deform=False) -> nn.Conv2d:
+def conv3x3(in_planes: int, out_planes: int, stride: int = 1, groups: int = 1, 
+            dilation: int = 1, deform=False, bias: bool = False) -> nn.Conv2d:
     """3x3 convolution with padding"""
     
     if deform:
         return DeformableConv2d(in_planes, out_planes, kernel_size=3, stride=stride,
-                     padding=dilation, groups=groups, bias=False, dilation=dilation)
+                     padding=dilation, groups=groups, bias=bias, dilation=dilation)
     else:
         return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
-                     padding=dilation, groups=groups, bias=False, dilation=dilation)
+                     padding=dilation, groups=groups, bias=bias, dilation=dilation)
 
 
-def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
+def conv1x1(in_planes: int, out_planes: int, stride: int = 1, bias: bool = False) -> nn.Conv2d:
     """1x1 convolution"""
-    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=bias)
 
 
 class BasicBlock(nn.Module):
@@ -104,31 +131,76 @@ class BasicBlock(nn.Module):
         groups: int = 1,
         base_width: int = 64,
         dilation: int = 1,
-        norm_layer: Optional[Callable[..., nn.Module]] = None
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+        activation_function = nn.ReLU(inplace=True),
+        use_bias=False
     ) -> None:
         super(BasicBlock, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         if groups != 1 or base_width != 64:
             raise ValueError('BasicBlock only supports groups=1 and base_width=64')
-        if dilation > 1:
-            raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
+        # if dilation > 1:
+        #     raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
         # Both self.conv1 and self.downsample layers downsample the input when stride != 1
-        self.conv1 = conv3x3(inplanes, planes, stride)
         
+        self.conv1 = conv3x3(inplanes, planes, stride, dilation=dilation, bias=use_bias)
         self.bn1 = norm_layer(planes)
-        self.relu = nn.ReLU(inplace=True)
-        self.conv2 = conv3x3(planes, planes)
+        self.activation = activation_function
+        self.conv2 = conv3x3(planes, planes, dilation=dilation, bias=use_bias)
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
         self.stride = stride
+
+    def forward(self, x: Tensor) -> Tensor:
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.activation(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        return out
+
+
+class IdentityBasicBlock(nn.Module):
+    expansion: int = 1
+
+    def __init__(
+         self,
+        inplanes: int,
+        planes: int,
+        stride: int = 1,
+        downsample: Optional[nn.Module] = None,
+        groups: int = 1,
+        base_width: int = 64,
+        dilation: int = 1,
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+        activation_function = nn.ReLU(inplace=True),
+        use_bias=False
+    ) -> None:
+        super(BasicBlock, self).__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        if groups != 1 or base_width != 64:
+            raise ValueError('BasicBlock only supports groups=1 and base_width=64')
+        # if dilation > 1:
+        #     raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
+        # Both self.conv1 and self.downsample layers downsample the input when stride != 1
+        self.conv1 = conv3x3(inplanes, planes, stride, use_bias)
+        self.bn1 = norm_layer(planes)
+        self.conv2 = conv3x3(planes, planes, use_bias)
+        self.bn2 = norm_layer(planes)
+        self.downsample = downsample
+        self.stride = stride
+        self.activation = activation_function
 
     def forward(self, x: Tensor) -> Tensor:
         identity = x
 
         out = self.conv1(x)
         out = self.bn1(out)
-        out = self.relu(out)
+        out = self.activation(out)
 
         out = self.conv2(out)
         out = self.bn2(out)
@@ -137,9 +209,10 @@ class BasicBlock(nn.Module):
             identity = self.downsample(x)
 
         out += identity
-        out = self.relu(out)
+        out = self.activation(out)
 
         return out
+
 
 
 class Bottleneck(nn.Module):
@@ -161,18 +234,19 @@ class Bottleneck(nn.Module):
         base_width: int = 64,
         dilation: int = 1,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
-        activation_function = nn.ReLU(inplace=True)
+        activation_function = nn.ReLU(inplace=True),
+        use_bias=False
     ) -> None:
         super(Bottleneck, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         width = int(planes * (base_width / 64.)) * groups
         # Both self.conv2 and self.downsample layers downsample the input when stride != 1
-        self.conv1 = conv1x1(inplanes, width)
+        self.conv1 = conv1x1(inplanes, width, bias=use_bias)
         self.bn1 = norm_layer(width)
-        self.conv2 = conv3x3(width, width, stride, groups, dilation,)
+        self.conv2 = conv3x3(width, width, stride, groups, dilation, bias=use_bias)
         self.bn2 = norm_layer(width)
-        self.conv3 = conv1x1(width, planes * self.expansion)
+        self.conv3 = conv1x1(width, planes * self.expansion, bias=use_bias)
         self.bn3 = norm_layer(planes * self.expansion)
         self.activation = activation_function
         
@@ -193,6 +267,68 @@ class Bottleneck(nn.Module):
         out = self.bn3(out)
 
         return out
+    
+    
+
+class PreActBottleneck(nn.Module):
+    # Bottleneck in torchvision places the stride for downsampling at 3x3 convolution(self.conv2)
+    # while original implementation places the stride at the first 1x1 convolution(self.conv1)
+    # according to "Deep residual learning for image recognition"https://arxiv.org/abs/1512.03385.
+    # This variant is also known as ResNet V1.5 and improves accuracy according to
+    # https://ngc.nvidia.com/catalog/model-scripts/nvidia:resnet_50_v1_5_for_pytorch.
+    
+    expansion: int = 4
+
+    def __init__(
+        self,
+        inplanes: int,
+        planes: int,
+        stride: int = 1,
+        downsample: Optional[nn.Module] = None,
+        groups: int = 1,
+        base_width: int = 64,
+        dilation: int = 1,
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+        activation_function = nn.ReLU(inplace=True),
+        use_bias=False
+    ) -> None:
+        super(PreActBottleneck, self).__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        width = int(planes * (base_width / 64.)) * groups
+        # Both self.conv2 and self.downsample layers downsample the input when stride != 1
+        
+        self.bn1 = norm_layer(inplanes)
+        self.conv1 = conv1x1(inplanes, width, bias=use_bias)
+        
+        self.bn2 = norm_layer(width)
+        self.conv2 = conv3x3(width, width, stride, groups, dilation, bias=use_bias)
+        
+        self.bn3 = norm_layer(width)
+        self.conv3 = conv1x1(width, planes * self.expansion, bias=use_bias)
+        
+        self.activation = activation_function
+        
+        self.downsample = downsample
+        self.stride = stride
+        self.out_channels = planes * self.expansion
+
+
+    def forward(self, x):
+        out = self.bn1(x)
+        out = self.activation(out)
+        out = self.conv1(out)
+
+        out = self.bn2(out)
+        out = self.activation(out)
+        out = self.conv2(out)
+
+        out = self.bn3(out)
+        out = self.activation(out)
+        out = self.conv3(out)
+        
+        return out
+
 
 
 class IdentityBottleneck(nn.Module):
@@ -219,6 +355,7 @@ class IdentityBottleneck(nn.Module):
         super(IdentityBottleneck, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
+            
         width = int(planes * (base_width / 64.)) * groups
         # Both self.conv2 and self.downsample layers downsample the input when stride != 1
         self.conv1 = conv1x1(inplanes, width)
@@ -233,36 +370,23 @@ class IdentityBottleneck(nn.Module):
         self.out_channels = planes * self.expansion
 
     def forward(self, x: Tensor) -> Tensor:
-        # cuda_device = torch.cuda.current_device()
-        # print(f"cuda: {cuda_device}, bottleneck 1")
         identity = x
-        # print(f"cuda: {cuda_device}, bottleneck 2")
 
         out = self.conv1(x)
-        # print(f"cuda: {cuda_device}, bottleneck 3")
         out = self.bn1(out)
-        # print(f"cuda: {cuda_device}, bottleneck 4")
         out = self.activation(out)
-        # print(f"cuda: {cuda_device}, bottleneck 5")
 
         out = self.conv2(out)
-        # print(f"cuda: {cuda_device}, bottleneck 6")
         out = self.bn2(out)
-        # print(f"cuda: {cuda_device}, bottleneck 7")
         out = self.activation(out)
-        # print(f"cuda: {cuda_device}, bottleneck 8")
 
         out = self.conv3(out)
-        # print(f"cuda: {cuda_device}, bottleneck 9")
         out = self.bn3(out)
-        # print(f"cuda: {cuda_device}, bottleneck 10")
 
         if self.downsample is not None:
             identity = self.downsample(x)
-            # print(f"cuda: {cuda_device}, bottleneck 10-1")
 
         out += identity
-        # print(f"cuda: {cuda_device}, bottleneck 11")
         return out
 
 
@@ -282,6 +406,19 @@ class ResNet(nn.Module):
         if norm_layer is None:
             nn.utils.memory_format
             norm_layer = nn.BatchNorm2d
+        
+        # else:
+        #     if norm_layer == "fbn":
+        #         norm_layer = misc_nn_ops.FrozenBatchNorm2d
+        #     elif norm_layer == "bn":
+        #         norm_layer = nn.BatchNorm2d
+        #     elif norm_layer == "layer":
+        #         norm_layer = nn.LayerNorm
+        #     elif norm_layer == "instance":
+        #         norm_layer = nn.InstanceNorm
+        #     else:
+        #         raise ValueError(f"not enrolled normalization method ({norm_layer})")
+            
         self._norm_layer = norm_layer
         
         self.inplanes = 64
@@ -298,6 +435,7 @@ class ResNet(nn.Module):
         
         activation_function = kwargs['activation_function']
         assert activation_function is not None
+        self.bias = kwargs['use_bias']
 
         self.in_channels = [64, 128, 256, 512]
         self.layer1 = self._make_layer(block, self.in_channels[0], layers[0],
@@ -327,33 +465,35 @@ class ResNet(nn.Module):
                     nn.init.constant_(m.bn3.weight, 0)  # type: ignore[arg-type]
                 elif isinstance(m, BasicBlock):
                     nn.init.constant_(m.bn2.weight, 0)  # type: ignore[arg-type]
-
-    
+                    
     def _make_layer(self, block: Type[Union[BasicBlock, Bottleneck]], planes: int, blocks: int,
                     stride: int = 1, dilate: bool = False,
                     activation_function=nn.ReLU(inplace=True)) -> nn.Sequential:
         norm_layer = self._norm_layer
         downsample = None
         previous_dilation = self.dilation
+        
         if dilate:
             self.dilation *= stride
             stride = 1
+            
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
-                conv1x1(self.inplanes, planes * block.expansion, stride),
+                conv1x1(self.inplanes, planes * block.expansion, stride, self.bias),
                 norm_layer(planes * block.expansion),
             )
 
         layers = []
         layers.append(block(self.inplanes, planes, stride, downsample, self.groups,
-                            self.base_width, previous_dilation, norm_layer, 
-                            activation_function=activation_function))
+                            # self.base_width, previous_dilation, norm_layer, 
+                            self.base_width, self.dilation, norm_layer, 
+                            activation_function=activation_function, use_bias=self.bias))
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
             layers.append(block(self.inplanes, planes, groups=self.groups,
                                 base_width=self.base_width, dilation=self.dilation,
                                 norm_layer=norm_layer, 
-                                activation_function=activation_function))
+                                activation_function=activation_function, use_bias=self.bias))
 
         return nn.Sequential(*layers)
 
@@ -388,6 +528,70 @@ class ResNet(nn.Module):
         return self._forward_impl(x)
     
 
+_COMMON_META = {
+    "min_size": (1, 1),
+    "categories": _IMAGENET_CATEGORIES,
+}
+
+
+class ResNet34_Weights(WeightsEnum):
+    IMAGENET1K_V1 = Weights(
+        url="https://download.pytorch.org/models/resnet34-b627a593.pth",
+        transforms=partial(ImageClassification, crop_size=224),
+        meta={
+            **_COMMON_META,
+            "num_params": 21797672,
+            "recipe": "https://github.com/pytorch/vision/tree/main/references/classification#resnet",
+            "_metrics": {
+                "ImageNet-1K": {
+                    "acc@1": 73.314,
+                    "acc@5": 91.420,
+                }
+            },
+            "_docs": """These weights reproduce closely the results of the paper using a simple training recipe.""",
+        },
+    )
+    DEFAULT = IMAGENET1K_V1
+
+
+class ResNet50_Weights(WeightsEnum):
+    IMAGENET1K_V1 = Weights(
+        url="https://download.pytorch.org/models/resnet50-0676ba61.pth",
+        transforms=partial(ImageClassification, crop_size=224),
+        meta={
+            **_COMMON_META,
+            "num_params": 25557032,
+            "recipe": "https://github.com/pytorch/vision/tree/main/references/classification#resnet",
+            "_metrics": {
+                "ImageNet-1K": {
+                    "acc@1": 76.130,
+                    "acc@5": 92.862,
+                }
+            },
+            "_docs": """These weights reproduce closely the results of the paper using a simple training recipe.""",
+        },
+    )
+    IMAGENET1K_V2 = Weights(
+        url="https://download.pytorch.org/models/resnet50-11ad3fa6.pth",
+        transforms=partial(ImageClassification, crop_size=224, resize_size=232),
+        meta={
+            **_COMMON_META,
+            "num_params": 25557032,
+            "recipe": "https://github.com/pytorch/vision/issues/3995#issuecomment-1013906621",
+            "_metrics": {
+                "ImageNet-1K": {
+                    "acc@1": 80.858,
+                    "acc@5": 95.434,
+                }
+            },
+            "_docs": """
+                These weights improve upon the results of the original paper by using TorchVision's `new training recipe
+                <https://pytorch.org/blog/how-to-train-state-of-the-art-models-using-torchvision-latest-primitives/>`_.
+            """,
+        },
+    )
+    DEFAULT = IMAGENET1K_V2
+
 
 def _resnet(
     block: Type[Union[BasicBlock, Bottleneck]],
@@ -397,9 +601,16 @@ def _resnet(
     progress: bool,
     **kwargs: Any
 ) -> ResNet:
+
+# def _resnet(
+#     block: Type[Union[BasicBlock, Bottleneck]],
+#     layers: List[int],
+#     weights: Optional[WeightsEnum],
+#     progress: bool,
+#     **kwargs: Any,
+# ) -> ResNet:
+
     model = ResNet(block, layers, **kwargs)
-    
-    
     
     # if pretrained:
     #     if weight_path is not None:
@@ -409,19 +620,22 @@ def _resnet(
     #     else:
     #         print("!!!Not load pretrained body weights!!!")
     
-    
-    
+    # if weights is not None:
+    #     print("2")
+    #     model.load_state_dict(weights.get_state_dict(progress=progress), strict=True)
+    #     print(3)
+            
     return model
 
 
 def get_resnet(model, weight_path=None, pretrained=True, **kwargs):
-    
     if model == 'resnet18':
         return resnet18(pretrained=pretrained, weight_path=weight_path, **kwargs)
     elif model == 'resnet34':
         return resnet34(pretrained=pretrained, weight_path=weight_path, **kwargs)
     elif model == 'resnet50':
         return resnet50(pretrained=pretrained, weight_path=weight_path, **kwargs)
+        # return resnet50(pretrained, **kwargs)
     elif model == 'resnet101':
         return resnet101(pretrained=pretrained, weight_path=weight_path, **kwargs)
     elif model == 'resnet152':
@@ -454,10 +668,28 @@ def resnet34(pretrained: bool = False, weight_path=None, progress: bool = True, 
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         progress (bool): If True, displays a progress bar of the download to stderr
     """
-    return _resnet(BasicBlock, [3, 4, 6, 3], pretrained, weight_path, progress,
-                   **kwargs)
+    
+    bottleneck_type = kwargs['bottleneck_type']
+    
+    if bottleneck_type == 'default':
+        block = BasicBlock
+    elif bottleneck_type == 'identity':
+        block = IdentityBasicBlock
+    elif bottleneck_type == 'preact':
+        block = PreActBottleneck
+    
+    weights = ResNet34_Weights.verify(weights)
+
+    return _resnet(block, [3, 4, 6, 3], weights, progress, **kwargs)
+    
+    
+    
+    # return _resnet(block, [3, 4, 6, 3], pretrained, weight_path, progress,
+    #                **kwargs)
 
 
+# @handle_legacy_interface(weights=("pretrained", ResNet50_Weights.IMAGENET1K_V1))
+# def resnet50(*, weights: Optional[ResNet50_Weights] = None, progress: bool = True, **kwargs: Any) -> ResNet:
 def resnet50(pretrained: bool = False, weight_path=None, progress: bool = True, **kwargs: Any) -> ResNet:
     r"""ResNet-50 model from
     `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_.
@@ -472,7 +704,12 @@ def resnet50(pretrained: bool = False, weight_path=None, progress: bool = True, 
         block = Bottleneck
     elif bottleneck_type == 'identity':
         block = IdentityBottleneck
-        
+    # elif bottleneck_type == 'preact':
+    #     block = PreActBottleneck
+    
+    # weights = ResNet50_Weights.verify(weights)
+    # return _resnet(block, [3, 4, 6, 3], weights, progress, **kwargs)
+    
     return _resnet(block, [3, 4, 6, 3], pretrained, weight_path, progress,
                    **kwargs)
 

@@ -90,27 +90,6 @@ def init_weights(m, type="kaiming", distribution='uniform'):
         nn.init.constant_(m.bias, 0)
         
     
-    # if isinstance(m, nn.Conv2d):
-    #     if type == 'kaiming':
-    #         nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
-    #     elif type == 'xavier':
-    #         nn.init.xavier_normal_(m.weight)
-        
-    #     if m.bias is not None:
-    #         nn.init.constant_(m.bias, 0)
-            
-    # elif isinstance(m, nn.BatchNorm2d):
-    #     nn.init.constant_(m.weight, 1)
-    #     nn.init.constant_(m.bias, 0)
-        
-    # elif isinstance(m, nn.Linear):
-    #     if type == 'kaiming':
-    #         nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
-    #     elif type == 'xavier':
-    #         nn.init.xavier_normal_(m.weight)
-    #     nn.init.constant_(m.bias, 0)
-
-
 class StaticMTL(nn.Module):
     def __init__(self,
                  backbone,
@@ -123,9 +102,20 @@ class StaticMTL(nn.Module):
         backbone_network = build_backbone(
             backbone, detector, segmentor, kwargs)
         
+        # self.is_preactivation = True if kwargs['bottleneck_type'] == 'preact' else False
+        
         if kwargs['backbone_weight'] is not None:
             backbone_weight = torch.load(kwargs['backbone_weight'])
-            backbone_network.body.load_state_dict(backbone_weight, strict=True)
+            
+            if 'use_bias' in kwargs:
+                if kwargs['use_bias']:
+                    strict=False
+                else:
+                    strict=True 
+            else:
+                strict=True
+            
+            backbone_network.body.load_state_dict(backbone_weight, strict=strict)
             print("!!!Loaded pretrained body weights!!!")
         
         self.num_per_block = []
@@ -148,8 +138,6 @@ class StaticMTL(nn.Module):
             'block': nn.ModuleList(blocks),
             'ds': nn.ModuleList(ds)
         })
-        
-        self.fpn = backbone_network.fpn
         
         self.stem = nn.ModuleDict()
         self.head = nn.ModuleDict()
@@ -188,12 +176,14 @@ class StaticMTL(nn.Module):
                 elif kwargs['init_dist'] == 'normal':
                     init_function = init_xavier_normal
         
-        
-        use_fpn = True if kwargs['use_fpn'] else False
-        
+        self.segmentation_lists = {}
         for data, cfg in task_cfg.items():
             datasets.append(data)
             self.return_layers.update({data: cfg['return_layers']})
+            
+            task = cfg['task']
+            if task == 'seg':
+                self.segmentation_lists[data] = list(cfg['num_classes'].keys())
             
             if 'stem' in cfg:
                 stem_cfg = cfg['stem']
@@ -208,7 +198,7 @@ class StaticMTL(nn.Module):
             stem_cfg.update(shared_stem_configs)
             head_cfg.update(shared_head_configs)
             
-            task = cfg['task']
+            
             num_classes = cfg['num_classes']
             if task == 'clf':
                 stem = ClfStem(**stem_cfg)
@@ -226,7 +216,7 @@ class StaticMTL(nn.Module):
                     backbone, detector, 
                     backbone_network.fpn_out_channels, num_classes, **head_cfg)
                 
-                if use_fpn:
+                if kwargs['use_fpn']:
                     if init_function is not None: backbone_network.fpn.apply(init_function)
                     head = nn.ModuleDict({
                         'fpn': backbone_network.fpn,
@@ -236,6 +226,8 @@ class StaticMTL(nn.Module):
             elif task == 'seg':
                 stem_cfg['stem_weight'] = kwargs['stem_weight']
                 stem = SegStem(**stem_cfg)
+                
+                head_cfg['dataset'] = data
                 head = build_segmentor(segmentor, num_classes=num_classes, cfg_dict=head_cfg)
             
             if init_function is not None: head.apply(init_function)
@@ -298,7 +290,7 @@ class StaticMTL(nn.Module):
             block_count=0
             for layer_idx, num_blocks in enumerate(self.num_per_block):
                 for block_idx in range(num_blocks):
-                    identity = ds_module[layer_idx](feat) if block_idx == 0 else feat
+                    identity = ds_module[layer_idx](feat) if block_idx == 0 and ds_module[layer_idx] is not None else feat
                     feat = self.activation_function(block_module[layer_idx][block_idx](feat) + identity)
                     
                     block_count += 1
@@ -326,7 +318,7 @@ class StaticMTL(nn.Module):
                     
                 elif task == 'seg':
                     losses = head(
-                        back_feats, targets, input_shape=targets.shape[-2:])
+                        back_feats, targets, input_shape=data_dict[dset][0].shape[-2:])
                 
                 losses = {f"feat_{dset}_{k}": l for k, l in losses.items()}
                 total_losses.update(losses)
@@ -348,11 +340,11 @@ class StaticMTL(nn.Module):
                 if task == 'seg':
                     predictions = head(
                         back_feats, input_shape=data_dict[dset][0].shape[-2:])
+                    
             
                 else:
                     predictions = head(back_feats)
-                
-                predictions = dict(outputs=predictions)
+                    predictions = dict(outputs=predictions)
             
             return predictions
 

@@ -7,7 +7,8 @@ from ..modules.get_detector import build_detector, DetStem
 from ..modules.get_backbone import build_backbone
 from ..modules.get_segmentor import build_segmentor, SegStem
 from ..modules.get_classifier import build_classifier, ClfStem
-from ...apis.loss_lib import AutomaticWeightedLoss
+from ...apis.gradient_based import define_gradient_method
+from ...apis.weighting_based import define_weighting_method
 
 
 # def init_weights(m, type="kaiming"):
@@ -87,8 +88,8 @@ def make_stem(task, stem_cfg, backbone=None, stem_weight=None, init_func=None):
     
     elif task == 'det':
         stem = DetStem(**stem_cfg)
-        if stem_weight is not None:
-            stem.load_state_dict(stem_weight, strict=True)
+        # if stem_weight is not None:
+        #     stem.load_state_dict(stem_weight, strict=False)
         
         if 'mobilenetv3' in backbone:
             for p in stem.parameters():
@@ -96,8 +97,8 @@ def make_stem(task, stem_cfg, backbone=None, stem_weight=None, init_func=None):
     
     elif task == 'seg':
         stem = SegStem(**stem_cfg)
-        if stem_weight is not None:
-            stem.load_state_dict(stem_weight, strict=True)
+        # if stem_weight is not None:
+        #     stem.load_state_dict(stem_weight, strict=False)
     
     return stem
     
@@ -110,7 +111,6 @@ def make_head(task, backbone, num_classes, dense_task=None, fpn_channel=256,
     
     elif task == 'det':
         assert dense_task is not None
-        head_cfg.update({})
         head = build_detector(
             backbone,
             dense_task, 
@@ -140,10 +140,21 @@ class SingleTaskNetwork(nn.Module):
         backbone_network = build_backbone(
             backbone, detector, segmentor, kwargs)
         
+        # self.is_preactivation = True if kwargs['bottleneck_type'] == 'preact' else False
+                
         backbone_weight = None
         if kwargs['backbone_weight'] is not None:
-            backbone_weight = torch.load(kwargs['backbone_weight'])
-            backbone_network.body.load_state_dict(backbone_weight, strict=True)
+            backbone_weight = torch.load(kwargs['backbone_weight'], map_location="cpu")
+            if kwargs['use_bias']:
+                strict=False
+                for n in list(backbone_weight.keys()):
+                    if "bn" in n:
+                       backbone_weight.pop(n) 
+            
+            else:
+                strict=True
+            
+            backbone_network.body.load_state_dict(backbone_weight, strict=strict)
             print("!!!Loaded pretrained body weights!!!")
         
         self.num_per_block = []
@@ -168,7 +179,7 @@ class SingleTaskNetwork(nn.Module):
         
         stem_weight = None
         if kwargs['stem_weight'] is not None:
-            stem_weight = torch.load(kwargs['stem_weight'])
+            stem_weight = torch.load(kwargs['stem_weight'], map_location='cpu')
         self.dset = dataset
         task = task_cfg['task']
         
@@ -176,6 +187,8 @@ class SingleTaskNetwork(nn.Module):
         head_cfg = task_cfg['head'] if 'head' in task_cfg else {}
         
         stem_cfg.update({'activation_function': kwargs['activation_function']})
+        stem_cfg.update({'stem_weight': stem_weight})
+        
         head_cfg.update({'activation_function': kwargs['activation_function']})
         
         init_type = kwargs['init_type'] if 'init_type' in kwargs else None
@@ -204,6 +217,7 @@ class SingleTaskNetwork(nn.Module):
         
         elif task == 'seg':
             dense_task_name = segmentor
+            head_cfg["dataset"] = self.dset
         
         self.stem = make_stem(task, stem_cfg, 
                               backbone, 
@@ -233,6 +247,43 @@ class SingleTaskNetwork(nn.Module):
         
         self.task = task    
         self.return_layers = task_cfg['return_layers']
+        
+        in_ddp_static = False
+        if "in_ddp_static" in kwargs:
+            in_ddp_static = kwargs['in_ddp_static']
+        
+        if not in_ddp_static:
+            if 'weight_method' in kwargs:
+                if kwargs['weight_method'] is not None:
+                    wm_param = kwargs['weight_method']
+                    w_type = wm_param.pop('type')
+                    init_param = wm_param.pop('init_param')
+                    self.weighting_method = define_weighting_method(w_type)
+                    if init_param: self.weighting_method.init_params(self.datasets, **wm_param)
+                else: self.weighting_method = None
+            else: self.weighting_method = None
+            
+            if 'grad_method' in kwargs:
+                if kwargs['grad_method'] is not None:
+                    gm_param = kwargs['grad_method']
+                    g_type = gm_param.pop('type')
+                    self.grad_method = define_gradient_method(g_type)
+                    self.grad_method.init_params(self.datasets, **gm_param)
+                    self.all_shared_params_numel, self.each_param_numel = self.compute_shared_encoder_numel()
+                    
+                    if 'weight_method_for_grad' in gm_param:
+                        if gm_param['weight_method_for_grad'] is not None:
+                            gw_params = gm_param['weight_method_for_grad']
+                            gw_type = gw_params.pop('type')
+                            init_param = gw_params.pop('init_param')
+                            grad_weighting_method = define_weighting_method(gw_type)
+                            if init_param: grad_weighting_method.init_params(self.datasets, **gw_params)
+                            setattr(self.grad_method, 'weighting_method', grad_weighting_method)
+                
+                else: self.grad_method = None
+            else: self.grad_method = None
+        
+        self.activation_function = kwargs['activation_function']
     
     
     def _forward_bakcbone(self, images):
@@ -243,8 +294,16 @@ class SingleTaskNetwork(nn.Module):
         ds_module = self.encoder['ds']
         for layer_idx, num_blocks in enumerate(self.num_per_block):
             for block_idx in range(num_blocks):
-                identity = ds_module[layer_idx](feat) if block_idx == 0 else feat
-                feat = F.leaky_relu(block_module[layer_idx][block_idx](feat) + identity)
+                identity = ds_module[layer_idx](feat) if block_idx == 0 and ds_module[layer_idx] is not None else feat
+                block_F = block_module[layer_idx][block_idx](feat)
+                feat = self.activation_function(block_F + identity)
+                
+                # if self.is_preactivation:
+                #     feat = block_F + identity
+                # else:
+                #     feat = self.activation_function(block_F + identity)
+                
+                
                 
             if block_idx == (num_blocks - 1):
                 if str(layer_idx) in self.return_layers:
@@ -289,33 +348,41 @@ class SingleTaskNetwork(nn.Module):
     def _forward_voc(self, images, targets=None):
         backbone_features = self._forward_bakcbone(images)
         
+        
         if self.training:
             losses = self.head(backbone_features, targets,
-                               input_shape=targets.shape[-2:])
+                               input_shape=images.shape[-2:])
             return losses
         
         else:
             predictions = self.head(
                     backbone_features, input_shape=images.shape[-2:])
             
-            # print(predictions.size())
-            return dict(outputs=predictions)
+            return predictions
+            # return dict(outputs=predictions)
             
 
     def _foward_train(self, data_dict):
-        images, targets = data_dict
+        if isinstance(data_dict, tuple):
+            images, targets = data_dict
+        elif isinstance(data_dict, dict):
+            images, targets = data_dict[self.dset]
+        
         loss_dict = self.task_forward(images, targets)
         
-        return loss_dict
+        final_losses = {f"{self.dset}_{k}": v for k, v in loss_dict.items()}
+        return final_losses
         
     
     def _forward_val(self, images):
+        if isinstance(images, (dict, OrderedDict)):
+            images, _ = images[self.dset]
         prediction_results = self.task_forward(images)
         
         return prediction_results
     
     
-    def forward(self, data_dict):
+    def forward(self, data_dict, kwargs=None):
         if self.training:
             return self._foward_train(data_dict)
 

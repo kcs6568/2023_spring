@@ -6,7 +6,7 @@ BACKBONE=$4
 METHOD=$5
 APPROACH=$6
 DESC=$7
-TRAIN_ROOT=/root/2023_spring/multipleDS_MTL
+TRAIN_ROOT=/root/src/multipleDS_MTL
 
 KILL_PROC="kill $(ps aux | grep gating_train.py | grep -v grep | awk '{print $2}')"
 TRAIN_FILE=gating_train.py

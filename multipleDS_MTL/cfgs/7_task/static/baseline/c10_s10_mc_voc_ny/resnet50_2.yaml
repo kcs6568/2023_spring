@@ -1,0 +1,133 @@
+setup: 'multi_task'
+method: 'baseline'
+approach: 'static'
+
+backbone: 'resnet50'
+detector: 'fasterrcnn'
+segmentor: 'fcn'
+
+use_minids: True
+
+state_dict: 
+  stem: /root/volume/pretrained_weights/resnet50_IM1K_dense_stem.pth
+  backbone: /root/volume/pretrained_weights/resnet50_IM1K_body.pth
+  # stem: null
+  # backbone: null
+
+task_cfg:
+  cifar10:
+    task: 'clf'
+    num_classes: 10
+    stem:
+      kernel_size: 3
+      stride: 1
+      padding: 1
+    head:
+      bias: True
+      in_channel: 2048
+    return_layers: ['3']
+
+  stl10:
+    task: 'clf'
+    num_classes: 10
+    input_size: 96
+    stem:
+      kernel_size: 3
+      stride: 1
+      padding: 1
+    head:
+      in_channel: 2048
+    return_layers: ['3']
+
+  minicoco:
+    task: 'det'
+    num_classes: 91
+    reduce_classes: False
+    stem:
+      out_channels: 64
+    return_layers: ['0', '1', '2', '3']
+  
+  voc:
+    task: 'seg'
+    num_classes: 
+      sseg: 21
+    task_cfg:
+      train:
+        year: '2012'
+        task: 'trainval'
+      test:
+        year: '2007'
+        task: 'test'
+    stem:
+      kernel_size: 7
+      stride: 2
+      padding: 3
+    head:
+      in_channels: 2048
+      use_aux: 
+        sseg: True
+    return_layers: ['2', '3']
+
+  nyuv2:
+    task: 'seg'
+    num_classes: 
+      sseg: 40
+      sn: 3
+      depth: 1
+    crop_h: 321
+    crop_w: 321
+    small_res: False
+    stem:
+      kernel_size: 7
+      stride: 2
+      padding: 3
+    head:
+      in_channels: 2048
+      use_aux:
+        sseg: True
+        sn: True
+        depth: True
+    return_layers: ['2', '3']
+  
+segmentation_lower_degree:
+  depth: ['abs_err', 'rel_err', 'sq_rel_err']
+  sn: ['angle_mean', 'angle_median']
+
+task_bs: 
+  - 4
+  - 2
+  - 2
+  - 2
+  - 2 
+
+lr_config: 
+  type: cosine
+
+baseline_args:
+  is_hardsampling: False
+  backbone_type: intermediate
+  dilation_type: fft
+  freeze_bn: True
+  use_bias: False
+  train_allbackbone: True
+  freeze_backbone: False
+  bottleneck_type: default
+activation_function: leakyrelu
+
+total_mean_grad: False
+task_balancing:
+  grad_method: null
+  weight_method:
+    type: dwa
+    init_param: True
+    total_epoch: 12
+    temperature: 2
+
+
+
+epochs: 12
+lr_steps: [8, 11]
+aspect-ratio-group-factor: 3
+print_freq: 50
+
+

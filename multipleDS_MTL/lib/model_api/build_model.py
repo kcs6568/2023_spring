@@ -20,7 +20,7 @@ def build_model(args):
     
     if arch_setup == 'single_task':
         from .task_model.single_task import SingleTaskNetwork
-        model_args.update({k: v for k, v in args.single_args.items()})
+        model_args.update({k: v for k, v in args.baseline_args.items()})
         model = SingleTaskNetwork(
             args.backbone,
             args.detector,

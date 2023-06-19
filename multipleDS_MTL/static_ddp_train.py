@@ -20,7 +20,7 @@ from lib.utils.parser import TrainParser
 from lib.utils.sundries import set_args
 from lib.utils.logger import TextLogger, TensorBoardLogger
 
-from lib.apis.warmup import get_warmup_scheduler
+from lib.apis.warmup import get_warmup_scheduler, create_warmup
 from lib.apis.optimization import get_optimizer, get_scheduler
 from lib.model_api.build_model import build_model
 
@@ -44,21 +44,15 @@ def adjust_learning_rate(optimizer, epoch, args, gamma_list=None):
 
 
 def main(args):
-    # os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
     metric_utils.mkdir(args.output_dir) # master save dir
     metric_utils.mkdir(os.path.join(args.output_dir, 'ckpts')) # checkpoint save dir
-    
-    # distributed.init_process_group(
-    #     ackend=args.dist_backend, init_method=args.dist_url, 
-    #     world_size=args.world_size, rank=args.rank, timeout=time.timedelta(seconds=120))
+    metric_utils.set_random_seed(args.seed)
     init_distributed_mode(args)
-    # setup_for_distributed(args.rank == 0)
-    
-    args.seed = metric_utils.set_random_seed(args.seed)
-    
     log_dir = os.path.join(args.output_dir, 'logs')
     metric_utils.mkdir(log_dir)
     logger = TextLogger(log_dir, print_time=False)
+    
+    logger.log_text(f"Seed: {torch.seed()}")
     
     if args.resume:
         logger.log_text("{}\n\t\t\tResume training\n{}".format("###"*40, "###"*45))
@@ -137,7 +131,7 @@ def main(args):
     
     best_results = {data: 0. for data in list(train_loaders.keys())}
     last_results = {data: 0. for data in list(train_loaders.keys())}
-    best_epoch = {data: 0 for data in list(train_loaders.keys())}
+    best_epoch = {}
     total_time = 0.
     
     if args.resume or args.resume_tmp or args.resume_file:
@@ -176,7 +170,6 @@ def main(args):
                 optimizer.param_groups[0]['lr'] = tmp_lr
             
             lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-            
             args.start_epoch = checkpoint["epoch"] + 1
             
             logger.log_text(f"Checkpoint List: {checkpoint.keys()}")
@@ -255,13 +248,7 @@ def main(args):
         if args.resume_tmp:
             args.resume_tmp = False
 
-    if args.start_epoch <= args.warmup_epoch:
-        if args.warmup_epoch > 1:
-            args.warmup_ratio = 1
-        biggest_size = len(list(train_loaders.values())[0])
-        warmup_sch = get_warmup_scheduler(optimizer, args.warmup_ratio, biggest_size * args.warmup_epoch)
-    else:
-        warmup_sch = None
+    warmup_sch = create_warmup(args, optimizer, len(list(train_loaders.values())[0]))
     
     logger.log_text(f"Parer Arguments:\n{args}")
 
@@ -271,6 +258,8 @@ def main(args):
     task_performance = {k: [] for k in train_loaders.keys()}
     task_loss = []
     task_acc = []
+    seg_scores = {dataset: {dt: [] for dt in cfg['num_classes'].keys()} for dataset, cfg in args.task_cfg.items() if cfg['task'] == "seg"}
+    seg_best = {dataset: {dt: [0, 0] for dt in cfg['num_classes'].keys()} for dataset, cfg in args.task_cfg.items() if cfg['task'] == "seg"}
     
     csv_dir = os.path.join(args.output_dir, "csv_results")
     os.makedirs(csv_dir, exist_ok=True)
@@ -294,10 +283,6 @@ def main(args):
                 torch.cuda.synchronize()
             time.sleep(3)
         
-        if warmup_sch is not None:
-            if epoch == args.warmup_epoch:
-                warmup_sch = None
-
         if not args.resume_tmp:
             # warmup_fn = get_warmup_scheduler if epoch == 0 else None
             once_train_results = static_engines_ddp.training(
@@ -314,14 +299,11 @@ def main(args):
             logger.log_text("Training Finish\n{}".format('---'*60))
 
             if lr_scheduler is not None:
-                if warmup_sch is None:
-                    lr_scheduler.step()
-                    
-            else:
-                adjust_learning_rate(optimizer, epoch, args)
+                if warmup_sch is not None:
+                    if warmup_sch.finish:
+                        lr_scheduler.step()
+                else: lr_scheduler.step()
 
-            # continue
-            
             if loss_header is None:
                 header = once_train_results[1][-1]
                 one_str_header = ''
@@ -378,37 +360,92 @@ def main(args):
             for dset, mac in results["task_flops"].items():
                 task_flops[dset].append(mac)
         
-        task_save = {dset: False for dset in args.task}
-        
+        task_save = {}
         tmp_acc = []
         line = '<Compare with Best>\n'
-        for data in args.task:
-            v = results[data]
-            tmp_acc.append(v)
-            task_performance[data].append(v)
-            line += '\t{}: Current Perf. || Previous Best: {} || {}\n'.format(
-                data.upper(), v, best_results[data]
-            )
+        for data in args.detailed_task:
+            tmp_results = {k: res for k, res in results.items() if data in k}
             
-            if not math.isfinite(v):
-                logger.log_text(f"Performance of data {data} is nan.")
-                v == 0.
+            for k, res in tmp_results.items():
+                if not torch.isnan(torch.tensor(res)):
+                    res = round(res, 3)
+                    
+                tmp_acc.append(res)
+                if k not in best_results:
+                    if "low" in k: 
+                        best_results[k] = 100.
+                    else:
+                        best_results[k] = 0.
+                if k not in best_epoch:
+                    best_epoch[k] = 0
                 
-            if v > best_results[data]:
-                best_results[data] = round(v, 2)
-                best_epoch[data] = epoch
-                task_save[data] = True
-            else:
-                task_save[data] = False
+                line += '\t{}: Current Perf. || Previous Best: {} || {}\n'.format(
+                    k.upper(), res, best_results[k]
+                )
+
+                if "low" in k:
+                    if res < best_results[k]:
+                        best_results[k] = round(res, 3)
+                        best_epoch[k] = epoch
+                        task_save[k] = True
+                    else:
+                        task_save[k] = False
+                else:
+                    if res > best_results[k]:
+                        best_results[k] = round(res, 3)
+                        best_epoch[k] = epoch
+                        task_save[k] = True
+                    else:
+                        task_save[k] = False
         
         task_acc.append(tmp_acc)
         
-        logger.log_text(line)  
-        logger.log_text(f"Best Epcoh per data: {best_epoch}")
+        logger.log_text(line)
+        
+        be_line = "Best Epcoh per data:\n"
+        for task_k, b_e in best_epoch.items():
+            be_line += f" - {task_k}: {b_e}\n"
+        logger.log_text(be_line + "\n")    
+        
         checkpoint['best_results'] = best_results
         checkpoint['last_results'] = results
         checkpoint['best_epoch'] = best_epoch
         checkpoint['total_time'] = total_time
+        
+        if args.setup != 'single_task':
+            for dataset, cfg in args.task_cfg.items():
+                if cfg['task'] == "seg":
+                    seg_refer = metric_utils.load_seg_referneces(dataset)
+                    
+                    for dt in cfg['num_classes'].keys():
+                        refer = {f"{dataset}_{dt}_{m}": v for m, v in seg_refer[dt].items()}
+                        dt_results = {k: v for k, v in results.items() if f"{dataset}_{dt}" in k}
+                        # print(dt_results)
+                        
+                        dt_scores = 0.
+                        value = 0
+                        for dt_k, dt_res in dt_results.items():
+                            if "low" in dt_k:
+                                value = (refer[dt_k] - dt_res) / refer[dt_k]
+                            else:
+                                value = (dt_res - refer[dt_k]) / refer[dt_k]
+                            value /= len(dt_results)
+                            dt_scores += value
+                        seg_scores[dataset][dt].append(dt_scores)
+                        
+                        result_line = f"{dataset.upper()} / {dt.upper()} Relative Results:\n"
+                        if epoch == 0:
+                            seg_best[dataset][dt][0] = dt_scores
+                            result_line += f"\t Best Score in epoch 0 : {dt_scores} ({seg_best[dataset][dt]})\n"
+                            
+                        else:
+                            if dt_scores > seg_best[dataset][dt][0]:
+                                seg_best[dataset][dt][0] = dt_scores
+                                seg_best[dataset][dt][1] = epoch
+                            result_line += f"\t Best Score: {dt_scores} | Best Epoch: {epoch} ({seg_best[dataset][dt]})\n"
+                        logger.log_text(result_line)
+                        
+            logger.log_text(f"Cumulative Seg Scores:\n{seg_scores}")
         
         if getattr(model.module, 'grad_method') is not None:
             if hasattr(model.module.grad_method, "get_save_information"):
@@ -420,10 +457,18 @@ def main(args):
             
             
         if tb_logger is not None:
-            logged_data = {dset: results[dset] for dset in args.task}
+            logged_data = {}
+            for res_k, res_v in results.items():
+                if isinstance(res_v, dict):
+                    for task_k, detailed_res in res_v.items():
+                        logged_data[task_k] = detailed_res
+                else:
+                    logged_data[res_k] = res_v
+            
             tb_logger.update_scalars(
                 logged_data, epoch, proc='val'
-            )   
+            ) 
+            
         torch.distributed.barrier()
         logger.log_text("Save model checkpoint...")
         save_file = os.path.join(args.output_dir, 'ckpts', f"checkpoint.pth")

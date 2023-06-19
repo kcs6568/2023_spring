@@ -522,18 +522,6 @@ class DDPGateMTL(nn.Module):
             return self.get_features(data_dict, cur_dataset)
         
         
-        # print(cur_dataset)
-        # if self.training:
-        #     output = self.task_single_network[cur_dataset](data_dict)
-        #     losses = {f"{cur_dataset}_{k}": v for k, v in output.items()}
-            
-        # else:
-        #     losses = self.task_single_network[cur_dataset](data_dict)
-        
-        # return losses
-        
-        
-        
     def __str__(self) -> str:
         info = f"[Current Gate Parameter States]\n"
         for data in self.datasets:

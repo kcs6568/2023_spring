@@ -1,0 +1,135 @@
+setup: 'multi_task'
+method: 'pcgrad'
+approach: 'static_ddp'
+
+backbone: 'resnet50'
+detector: 'fasterrcnn'
+segmentor: 'fcn'
+
+use_minids: True
+
+state_dict: 
+  stem: /root/volume/pretrained_weights/resnet50_IM1K_dense_stem.pth
+  backbone: /root/volume/pretrained_weights/resnet50_IM1K_body.pth
+  # stem: null
+  # backbone: null
+
+task_cfg:
+  cifar10:
+    task: 'clf'
+    num_classes: 10
+    stem:
+      kernel_size: 3
+      stride: 1
+      padding: 1
+    head:
+      bias: False
+      in_channel: 2048
+    return_layers: ['3']
+
+  stl10:
+    task: 'clf'
+    num_classes: 10
+    input_size: 96
+    stem:
+      kernel_size: 3
+      stride: 1
+      padding: 1
+    head:
+      in_channel: 2048
+    return_layers: ['3']
+
+  minicoco:
+    task: 'det'
+    num_classes: 91
+    reduce_classes: False
+    stem:
+      out_channels: 64
+    return_layers: ['0', '1', '2', '3']
+  
+  voc:
+    task: 'seg'
+    num_classes:
+      sseg: 21
+    task_cfg:
+      train:
+        year: '2012'
+        task: 'trainval'
+      test:
+        year: '2007'
+        task: 'test'
+    stem:
+      kernel_size: 7
+      stride: 2
+      padding: 3
+    head:
+      bias: True
+      in_channels: 2048
+      use_aux: True
+      dropout_ratio: 0.1
+    return_layers: ['2', '3']
+
+  nyuv2:
+    task: 'seg'
+    num_classes: 
+      sseg: 40
+      sn: 3
+      depth: 1
+    crop_h: 321
+    crop_w: 321
+    small_res: False
+    stem:
+      kernel_size: 7
+      stride: 2
+      padding: 3
+    head:
+      bias: True
+      in_channels: 2048
+      use_aux: True
+      dropout_ratio: 0.2
+    return_layers: ['2', '3']
+
+task_bs: 
+  - 4
+  - 2
+  - 2
+  - 2
+  - 2 
+
+# weight_decay: 0.01
+
+lr_config: 
+  type: cosine
+
+baseline_args:
+  is_hardsampling: False
+  backbone_type: intermediate
+  dilation_type: fft
+  freeze_bn: True
+  norm_layer: bn #layer
+  use_bias: False
+  train_allbackbone: True
+  freeze_backbone: False
+  bottleneck_type: default
+activation_function: leakyrelu
+
+loss_ratio:
+  nyuv2_sseg: 0.1
+  nyuv2_sn: 0.01
+  nyuv2_depth: 1
+
+total_mean_grad: True
+task_balancing: 
+  grad_method:
+    type: pcgrad
+    require_copied_grad: True
+  weight_method: null
+
+loss_ratio: null
+epochs: 12
+lr_steps: [8, 11]
+aspect-ratio-group-factor: 3
+print_freq: 50
+
+
+

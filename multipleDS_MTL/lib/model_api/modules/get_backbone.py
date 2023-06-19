@@ -180,20 +180,10 @@ def resnet_without_fpn(
 def build_backbone(arch, detector=None,
                    segmentor=None,
                    model_args=None):
-    # model_args = {}
-    
     freeze_backbone = model_args.pop('freeze_backbone')
     train_allbackbone = model_args.pop('train_allbackbone')
     freeze_bn = model_args.pop('freeze_bn')
-    # if freeze_backbone:
-    #     if not train_allbackbone:
-    #         train_allbackbone = False
-    # elif train_allbackbone:
-    #     if not freeze_backbone:
-    #         freeze_backbone = False
-    # else:
-    #     raise RuntimeError("the value of freeze_backbone must be the opposite value of train_allbackbone and vise versa")           
-
+    
     if 'without_fpn' in model_args:
         without_fpn = model_args['without_fpn']
     else:
@@ -201,8 +191,8 @@ def build_backbone(arch, detector=None,
     
     model_args.update({
         'norm_layer': misc_nn_ops.FrozenBatchNorm2d if freeze_bn else None,
+        # 'norm_layer': "fbn" if freeze_bn else model_args['norm_type'],
         'deform_layers': model_args['deform'] if 'deform' in model_args else False,
-        # 'weight_path': model_args['state_dict']['backbone'],
         'backbone_type': 'intermediate' if not 'backbone_type' in model_args is None else model_args['backbone_type'],
         'extra_blocks': None})
     
@@ -275,86 +265,22 @@ def build_backbone(arch, detector=None,
         model_args.update({'activation_fucntion': model_args['activation_function'] if 'activation_function' in model_args else None})
         model_args.update({'trainable_layers': trainable_backbone_layers})
         
-        
         if without_fpn:
             backbone = resnet_without_fpn(
                 arch,
                 model_args
             )
+            
         else:
             model_args.update({'returned_layers': check_return_layers(detector, segmentor)})
             backbone = resnet_fpn_backbone(
                 arch,
                 model_args
             )
-            
+        
 
         return backbone
 
 
 
     
-
-
-# norm_layer = misc_nn_ops.FrozenBatchNorm2d if freeze_bn else None
-    
-    # weight_path = model_args['state_dict']['backbone']
-    # deform = model_args['deform']
-    # use_fpn = False if not 'use_fpn' in model_args else model_args['use_fpn']
-    # backbone_type = 'intermediate' if not 'backbone_type' in model_args is None else model_args['backbone_type']
-    # erase_relu = model_args['erase_relu'] if 'erase_relu' in model_args else False
-
-
-
-
-# class BackboneWithNoFPN(nn.Module):
-#     def __init__(self, backbone, return_layers):
-#         super(BackboneWithNoFPN, self).__init__()
-#         self.body = IntermediateLayerGetter(backbone, return_layers=return_layers)
-#         self.body_out_channel = backbone.last_out_channel
-
-
-#     def forward(self, x):
-#         x = self.body(x)
-        
-#         return x
-
-
-# def resnet_backbone(
-#     backbone_name,
-#     use_segmentor=None,
-#     weight_path=None,
-#     pretrained=True,
-#     norm_layer=torchvision.ops.misc.FrozenBatchNorm2d,
-#     trainable_layers=4,
-#     returned_layers=4,
-# ):
-#     if 'res' in backbone_name:
-#         if use_segmentor:
-#             replace_stride_with_dilation = [False, True, True]
-#         else:
-#             replace_stride_with_dilation = None
-            
-#         kwargs = {
-#                 'replace_stride_with_dilation': replace_stride_with_dilation
-#             }
-        
-#         backbone = get_resnet(backbone_name, weight_path, **kwargs)
-    
-#     assert 0 <= trainable_layers <= 4
-#     layers_to_train = ['layer4', 'layer3', 'layer2', 'layer1'][:trainable_layers]
-    
-#     for name, parameter in backbone.named_parameters():
-#         if all([not name.startswith(layer) for layer in layers_to_train]):
-#             parameter.requires_grad_(False)
-    
-#     # for n, p in backbone.named_parameters():
-#     #     print(n, p.requires_grad)
-        
-#     if returned_layers is None:
-#         returned_layers = [1, 2, 3, 4]
-#     assert min(returned_layers) > 0 and max(returned_layers) < 5
-#     return_layers = {f'layer{k}': str(v) for v, k in enumerate(returned_layers)}
-    
-    
-#     return BackboneWithNoFPN(backbone, return_layers)

@@ -190,7 +190,10 @@ class DynamicWeightAverage(AbsWeighting):
         if self.use_alter_step:
             self.apply_method = True if self.epoch in self.alter_step else False
         else: self.apply_method = True
-    
+
+        if not "start_epoch" in params:
+            self.start_epoch = 2
+            
     # def set_before_learning(self, **before_argu):
     #     for k, v in before_argu.items(): setattr(self, k, v)
         
@@ -213,7 +216,11 @@ class DynamicWeightAverage(AbsWeighting):
             type_position = k.find("_")
             types = k[:type_position]
             key = k[type_position+1:]
-            setattr(self.weighting_method, key, v)
+            
+            if types == "weight":
+                assert hasattr(self, "weighting_method")
+                setattr(self, key, v)
+            # setattr(self.weighting_method, key, v)
     
     
     def after_iter(self):
@@ -238,15 +245,14 @@ class DynamicWeightAverage(AbsWeighting):
         assert isinstance(losses, (dict, OrderedDict))
         for k in self.task_list: self.iter_loss_buffer[k].append(losses[k].clone().detach())
         
-        if self.epoch < 2:
+        if self.epoch < self.start_epoch:
             return None
         
         else:
-            w_i = {k: torch.Tensor(
-                self.train_loss_buffer[k][self.epoch-1]/self.train_loss_buffer[k][self.epoch-2]
-                ).to(get_rank()) for k in self.train_loss_buffer.keys()}
+            w_i = [torch.Tensor(
+                self.train_loss_buffer[k][self.epoch-1]/self.train_loss_buffer[k][self.epoch-2]).to(get_rank()) for k in self.train_loss_buffer.keys()]
             
-            batch_weight = len(self.task_list)*F.softmax(torch.stack(list(w_i.values()))/self.temperature, dim=-1)
+            batch_weight = len(self.task_list)*F.softmax(torch.stack(w_i)/self.temperature, dim=-1)
             
             total_loss = {f"DWA_{k}_loss": batch_weight[i] * v for i, (k, v) in enumerate(losses.items())}
         

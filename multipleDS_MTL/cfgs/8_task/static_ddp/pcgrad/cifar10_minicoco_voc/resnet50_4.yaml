@@ -1,0 +1,99 @@
+setup: 'multi_task'
+approach: 'static_ddp'
+method: 'pcgrad'
+
+backbone: 'resnet50'
+detector: 'fasterrcnn'
+segmentor: 'fcn'
+
+use_minids: True
+
+state_dict: 
+  stem: '/root/volume/pretrained_weights/resnet50_IM1K_dense_stem.pth'
+  backbone: '/root/volume/pretrained_weights/resnet50_IM1K_body.pth'
+  # stem: null
+  # backbone: null
+
+task_cfg:
+  cifar10:
+    task: 'clf'
+    num_classes: 10
+    stem:
+      kernel_size: 3
+      stride: 1
+      padding: 1
+    head:
+      in_channel: 2048
+    return_layers: ['3']
+
+  minicoco:
+    task: 'det'
+    num_classes: 91
+    reduce_classes: False
+    stem:
+      out_channels: 64
+    return_layers: ['0', '1', '2', '3']
+  
+  voc:
+    task: 'seg'
+    num_classes: 21
+    task_cfg:
+      train:
+        year: '2012'
+        task: 'trainval'
+      test:
+        year: '2007'
+        task: 'test'
+    stem:
+      kernel_size: 7
+      stride: 2
+      padding: 3
+    head:
+      in_channels: 2048
+      use_aux: True
+    return_layers: ['2', '3']
+
+task_bs: 
+  - 4
+  - 2
+  - 2
+
+lr_config:
+  type: exp
+  gamma: 0.85
+
+baseline_args:
+  is_hardsampling: False
+  backbone_type: origin
+  dilation_type: fft
+  freeze_bn: False
+  train_allbackbone: True
+  freeze_backbone: False
+  relu_type: null
+  freeze_stem: False
+  bottleneck_type: default
+  weight_method: null
+  base_dataset: cifar10
+  init_type: kaiming
+  init_dist: normal
+activation_function: leakyrelu
+
+total_mean_grad: True
+task_balancing: 
+  grad_method:
+    type: pcgrad
+    require_copied_grad: True
+  weight_method: 
+    type: dwa
+    init_param: True
+    total_epoch: 12
+    temperature: 2.0
+
+loss_ratio: null
+epochs: 12
+lr_steps: [8, 11]
+aspect-ratio-group-factor: 3
+print_freq: 50
+
+
+

@@ -39,21 +39,25 @@ def load_datasets(args, only_val=True):
                 test_ld = None
                 train_ld, val_ld = load_imagenet1k(args, data, path='/root/data/ImageNet-1K', only_val=only_val)
                 
-            # elif data == 'omniglot':
-            #     test_ld = None
-            #     train_ld, val_ld = load_omniglot(args, data, path='/root/data/pytorch_datasets/')
+            elif data == 'tinyim1k':
+                test_ld = None
+                train_ld, val_ld = load_tiny_im1k(args, data, path='/root/data/img_type_datsets/tiny-imagenet-200', img_size=cfg['input_size'])
                 
-            # elif data == 'usps':
-            #     test_ld = None
-            #     train_ld, val_ld = load_usps(args, data, path='/root/data/pytorch_datasets/USPS')
+            elif data == 'omniglot':
+                test_ld = None
+                train_ld, val_ld = load_omniglot(args, data, path='/root/data/pytorch_datasets/')
+                
+            elif data == 'usps':
+                test_ld = None
+                train_ld, val_ld = load_usps(args, data, path='/root/data/pytorch_datasets/USPS')
             
             # elif data == 'mnist':
             #     test_ld = None
             #     train_ld, val_ld = load_mnist(args, data, path='/root/data/pytorch_datasets')
             
-            # elif data == 'fashion':
-            #     test_ld = None
-            #     train_ld, val_ld = load_fashion(args, data, path='/root/data/pytorch_datasets')
+            elif data == 'fashion':
+                test_ld = None
+                train_ld, val_ld = load_fashion(args, data, path='/root/data/pytorch_datasets')
             
 
         elif 'det' in cfg['task']:
@@ -71,12 +75,20 @@ def load_datasets(args, only_val=True):
                 train_ld, val_ld, test_ld = load_voc(args, data, cfg['task'], cfg['task_cfg'])
                 
             elif 'cityscapes' in data:
-                train_ld, val_ld, test_ld = load_cityscape(args, cfg['task'], data, "/root/data/img_type_datasets/cityscapes")
-           
+                train_ld, val_ld, test_ld = load_cityscape(args, cfg, "/root/data/cityscapes")
+                
+            elif 'nyuv2' in data:
+                train_ld, val_ld, test_ld = load_nyuv2(args, cfg, cfg['task'], "/root/data/nyu_v2")
+            
+            elif 'taskonomy' in data:
+                train_ld, val_ld, test_ld = load_taskonomy(args, cfg, cfg['task'], "/root/data/tiny-taskonomy")
+        
+        assert train_ld is not None and val_ld is not None
+        
         train_loaders[data] = train_ld
         val_loaders[data] = val_ld
         
-        if test_ld:
+        if test_ld is not None:
             test_loaders[data] = test_ld
     
     # print(train_loaders)
@@ -218,8 +230,11 @@ def load_stl10(args, data, path, input_size=96):
     if not 'color_jitter' in args:
         args.color_jitter = False
     
-    normalize = transforms.Normalize(
-        mean = [0.4914, 0.4822, 0.4465], std = [0.2023, 0.1994, 0.2010])
+    # normalize = transforms.Normalize(
+    #     mean = [0.4914, 0.4822, 0.4465], std = [0.2023, 0.1994, 0.2010])
+    
+    normalize = transforms.Normalize(mean=[x/255.0 for x in [125.3, 123.0, 113.9]],
+                                     std=[x/255.0 for x in [63.0, 62.1, 66.7]])
     
     if args.color_jitter:
         train_transform = transforms.Compose([
@@ -261,8 +276,8 @@ def load_stl10(args, data, path, input_size=96):
     # train_loader, test_loader = get_dataloader(train_dataset, test_dataset, train_sampler, test_sampler, 
     #                                             args, args.batch_size)
     
-    train_loader = get_train_dataloader(train_dataset, train_sampler, args, args.batch_size)
-    test_loader = get_test_dataloader(test_dataset, test_sampler, args, args.batch_size)
+    train_loader = get_train_dataloader(train_dataset, train_sampler, args)
+    test_loader = get_test_dataloader(test_dataset, test_sampler, args)
     
     return train_loader, test_loader
 
@@ -307,6 +322,67 @@ def load_imagenet1k(args, path, img_size=224, only_val=True):
         return None, val_loader
     else:
         return train_loader, val_loader
+    
+    
+def load_tiny_im1k(args, data, path, img_size=64, only_val=False):
+    if args.state_dict["backbone"] is None and args.state_dict["stem"] is None:
+        normalize = transforms.Normalize(
+            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    else:
+        normalize = transforms.Normalize(
+            mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    
+    traindir = os.path.join(path, 'train')
+    valdir = os.path.join(path, 'val')
+    
+    if img_size > 64:
+        resize = img_size + (img_size // 8)
+        
+        train_transforms = transforms.Compose([
+            transforms.Resize(resize), transforms.RandomCrop(img_size), transforms.RandomHorizontalFlip(), transforms.ToTensor(), normalize
+        ])
+        val_transforms = transforms.Compose([
+            transforms.Resize(resize), transforms.RandomCrop(img_size), transforms.ToTensor(), normalize
+        ])
+        
+    elif img_size == 64:
+        train_transforms = transforms.Compose([
+            # transforms.RandomCrop(img_size, 4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(), normalize
+        ])
+        val_transforms = transforms.Compose([
+            transforms.ToTensor(), normalize
+        ])
+    
+    
+    train_dataset = datasets.ImageFolder(
+        traindir,
+        train_transforms)
+    val_dataset = datasets.ImageFolder(
+        valdir,
+        val_transforms)
+    
+    data_size = get_train_dataloader(train_dataset, None, args, 1)
+    args.all_data_size[data] = len(data_size)
+    del data_size
+    
+    train_sampler = None
+    val_sampler = None
+    
+    if args.distributed:
+        train_sampler, val_sampler = return_sampler(train_dataset, val_dataset, args.world_size, args.gpu, args.seed)
+    
+    args.pin_memory = True
+    
+    train_loader = get_train_dataloader(train_dataset, train_sampler, args)
+    val_loader = get_test_dataloader(val_dataset, val_sampler, args)
+    
+    if only_val:
+        return None, val_loader
+    else:
+        return train_loader, val_loader
+
     
     
 def load_omniglot(args, data, path):
@@ -359,19 +435,20 @@ def load_omniglot(args, data, path):
     # train_loader, test_loader = get_dataloader(train_dataset, test_dataset, train_sampler, test_sampler, 
     #                                             args, args.batch_size)
     
-    train_loader = get_train_dataloader(train_dataset, train_sampler, args, args.batch_size)
-    test_loader = get_test_dataloader(test_dataset, test_sampler, args, args.batch_size)
+    train_loader = get_train_dataloader(train_dataset, train_sampler, args)
+    test_loader = get_test_dataloader(test_dataset, test_sampler, args)
     
     return train_loader, test_loader
 
 
 def load_usps(args, data, path):
     usps_transforms = transforms.Compose([
-        transforms.Resize([28, 28]),
+        transforms.Resize([16, 16]),
         transforms.ToTensor(),
         transforms.Normalize((0.5,), (0.5,))
     ])
     
+    download = True
     # getitem에서 PIL color space를 강제로 rgb로 변경했음
     train_dataset = datasets.USPS(
         path,
@@ -400,8 +477,8 @@ def load_usps(args, data, path):
     # train_loader, test_loader = get_dataloader(train_dataset, test_dataset, train_sampler, test_sampler, 
     #                                             args, args.batch_size)
     
-    train_loader = get_train_dataloader(train_dataset, train_sampler, args, args.batch_size)
-    test_loader = get_test_dataloader(test_dataset, test_sampler, args, args.batch_size)
+    train_loader = get_train_dataloader(train_dataset, train_sampler, args)
+    test_loader = get_test_dataloader(test_dataset, test_sampler, args)
     
     return train_loader, test_loader
 
@@ -478,8 +555,8 @@ def load_fashion(args, data, path):
     # train_loader, test_loader = get_dataloader(train_dataset, test_dataset, train_sampler, test_sampler, 
     #                                             args, args.batch_size)
     
-    train_loader = get_train_dataloader(train_dataset, train_sampler, args, args.batch_size)
-    test_loader = get_test_dataloader(test_dataset, test_sampler, args, args.batch_size)
+    train_loader = get_train_dataloader(train_dataset, train_sampler, args)
+    test_loader = get_test_dataloader(test_dataset, test_sampler, args)
     
     return train_loader, test_loader
 
@@ -579,57 +656,36 @@ def load_voc(args, data, task_type, task_cfg):
     # args.pin_memory = True  
     
     train_loader = get_train_dataloader(
-        train_ds, train_sampler, args, collate_fn=voc_collate_fn(task_type))
+        train_ds, train_sampler, args, collate_fn=collate_seg(task_type))
     
     val_loader = get_test_dataloader(
-       val_ds, val_sampler, args, collate_fn=voc_collate_fn(task_type))
+       val_ds, val_sampler, args, collate_fn=collate_seg(task_type))
     
     return train_loader, val_loader, test_loader
 
 
-def load_cityscape(args, task_type, data, path):
-    from .cityscapes.cityscapes_dataset import CityScapes
+def load_cityscape(args, cfg, path):
+    from .cityscapes import CityScapes
     # from lib.transforms import seg_transforms, shared_transforms
     '''
     Reference of used transform below:
         https://github.com/VainF/DeepLabV3Plus-Pytorch/blob/master/main.py
     '''
     
-    train_transform = get_transforms(task_type, True, args)
-    test_transform = get_transforms(task_type, False, args)
-    
-    # crop_size = args.task_cfg['cityscapes']['crop_size']
-    # train_transform = shared_transforms.Compose([
-    #         seg_transforms.RandomCrop(size=crop_size),
-    #         seg_transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5),
-    #         seg_transforms.RandomHorizontalFlip(flip_prob=0.5),
-    #         seg_transforms.PILToTensor(),
-    #         shared_transforms.ConvertImageDtype(torch.float),
-    #         seg_transforms.Normalize(mean=[0.485, 0.456, 0.406],
-    #                         std=[0.229, 0.224, 0.225]),
-    #     ])
-
-    # val_transform = shared_transforms.Compose([
-    #     seg_transforms.PILToTensor(),
-    #     shared_transforms.ConvertImageDtype(torch.float),
-    #     seg_transforms.Normalize(mean=[0.485, 0.456, 0.406],
-    #                     std=[0.229, 0.224, 0.225]),
-    # ])
-    
     train_ds = CityScapes(
-        root=path,
-        split='train',
-        transform=train_transform
+        dataroot=path,
+        mode="train",
+        cfg=cfg
     )
     
     val_ds = CityScapes(
-        root=path,
-        split='val',
-        transform=test_transform
+        dataroot=path,
+        mode="test",
+        cfg=cfg
     )
     
     data_size = get_train_dataloader(train_ds, None, args, 1)
-    args.all_data_size[data] = len(data_size)
+    args.all_data_size["cityscapes"] = len(data_size)
     del data_size
     
     if args.distributed:
@@ -639,19 +695,79 @@ def load_cityscape(args, task_type, data, path):
         val_sampler = torch.utils.data.SequentialSampler(val_ds)
 
     test_loader = None
-    
-    # args.pin_memory = False
-    # if len(args.task_bs) == 1:
-    #     args.pin_memory = True
-    
     args.pin_memory = False
     
-    # args.pin_memory = True  
+    train_loader = get_train_dataloader(train_ds, train_sampler, args)
+    val_loader = get_test_dataloader(val_ds, val_sampler, args)
     
-    train_loader = get_train_dataloader(
-        train_ds, train_sampler, args, args.batch_size)
+    return train_loader, val_loader, test_loader
+
+
+
+def load_nyuv2(args, cfg, task_type, path):
+    from .nyu_v2 import NYU_v2
     
-    val_loader = get_test_dataloader(
-       val_ds, val_sampler, args, bs=1)
+    train_ds = NYU_v2(
+        dataroot=path,
+        mode="train",
+        cfg=cfg
+    )
+    
+    val_ds = NYU_v2(
+        dataroot=path,
+        mode="test",
+        cfg=cfg
+    )
+    
+    data_size = get_train_dataloader(train_ds, None, args, 1)
+    args.all_data_size["nyuv2"] = len(data_size)
+    del data_size
+    
+    if args.distributed:
+        train_sampler, val_sampler = return_sampler(train_ds, val_ds, args.world_size, args.gpu, args.seed)
+    else:
+        train_sampler = torch.utils.data.RandomSampler(train_ds)
+        val_sampler = torch.utils.data.SequentialSampler(val_ds)
+
+    test_loader = None
+    args.pin_memory = False
+    
+    train_loader = get_train_dataloader(train_ds, train_sampler, args)
+    val_loader = get_test_dataloader(val_ds, val_sampler, args)
+    
+    return train_loader, val_loader, test_loader
+
+
+
+def load_taskonomy(args, cfg, task_type, path):
+    from .taskonomy import Taskonomy
+    
+    train_ds = Taskonomy(
+        dataroot=path,
+        mode="train",
+        cfg=cfg
+    )
+    
+    val_ds = Taskonomy(
+        dataroot=path,
+        mode="test_small",
+        cfg=cfg
+    )
+    
+    data_size = get_train_dataloader(train_ds, None, args, 1)
+    args.all_data_size["taskonomy"] = len(data_size)
+    del data_size
+    
+    if args.distributed:
+        train_sampler, val_sampler = return_sampler(train_ds, val_ds, args.world_size, args.gpu, args.seed)
+    else:
+        train_sampler = torch.utils.data.RandomSampler(train_ds)
+        val_sampler = torch.utils.data.SequentialSampler(val_ds)
+
+    test_loader = None
+    args.pin_memory = False
+    
+    train_loader = get_train_dataloader(train_ds, train_sampler, args)
+    val_loader = get_test_dataloader(val_ds, val_sampler, args)
     
     return train_loader, val_loader, test_loader

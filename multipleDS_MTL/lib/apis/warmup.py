@@ -2,13 +2,35 @@ import warnings
 import torch
 
 
-def get_warmup_scheduler(optimizer, warmup_ratio, largest_size):
+def create_warmup(args, optimizer, largest_size):
+    if args.warmup:
+        if args.start_epoch < args.warmup_epoch:
+            if args.warmup_epoch > 1:
+                total_iters = largest_size * args.warmup_epoch
+                args.warmup_ratio = 1
+            else:
+                total_iters = args.warmup_iters
+                args.warmup_epoch = 1
+            
+            warmup_sch = get_warmup_scheduler(
+                optimizer, 
+                args.warmup_ratio, 
+                total_iters)
+        else:
+            warmup_sch = None
+    else:
+        warmup_sch = None
+        
+    return warmup_sch
+
+
+def get_warmup_scheduler(optimizer, warmup_ratio, total_iters):
     if warmup_ratio == -1:
         return None
     elif warmup_ratio < 1:
-        warmup_iters = largest_size * warmup_ratio
+        warmup_iters = total_iters * warmup_ratio
     elif warmup_ratio == 1:
-        warmup_iters = largest_size
+        warmup_iters = total_iters
     elif warmup_ratio > 1:
         warmup_iters = warmup_ratio
     else:
@@ -69,7 +91,10 @@ class LinearLR(torch.optim.lr_scheduler._LRScheduler):
         self.start_factor = start_factor
         self.end_factor = end_factor
         self.total_iters = total_iters
+        self.finish = False
+        
         super(LinearLR, self).__init__(optimizer, last_epoch, verbose)
+        
 
     def get_lr(self):
         if not self._get_lr_called_within_step:
@@ -80,12 +105,14 @@ class LinearLR(torch.optim.lr_scheduler._LRScheduler):
             return [group['lr'] * self.start_factor for group in self.optimizer.param_groups]
 
         if (self.last_epoch > self.total_iters):
+            self.finish = True
             return [group['lr'] for group in self.optimizer.param_groups]
 
         return [group['lr'] * (1. + (self.end_factor - self.start_factor) /
                 (self.total_iters * self.start_factor + (self.last_epoch - 1) * (self.end_factor - self.start_factor)))
                 for group in self.optimizer.param_groups]
-
+        
+    
     def _get_closed_form_lr(self):
         return [base_lr * (self.start_factor +
                 (self.end_factor - self.start_factor) * min(self.total_iters, self.last_epoch) / self.total_iters)

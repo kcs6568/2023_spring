@@ -6,7 +6,7 @@ BACKBONE=$4
 METHOD=$5
 APPROACH=$6
 DESC=$7
-TRAIN_ROOT=/root/2023_spring/multipleDS_MTL
+TRAIN_ROOT=/root/src/multipleDS_MTL
 
 KILL_PROC="kill $(ps aux | grep static_ddp_train.py | grep -v grep | awk '{print $2}')"
 TRAIN_FILE=static_ddp_train.py
@@ -87,7 +87,7 @@ do
                 CUDA_VISIBLE_DEVICES=$DEVICES torchrun --nproc_per_node=$3 --master_port=$1 \
                     $TRAIN_SCRIPT --general \
                     --cfg $CFG_PATH \
-                    --warmup-ratio 1000 --workers 4 \
+                    --warmup --warmup-ratio 1000 --workers 4 \
                     --exp-case $exp_case --grad-to-none \
                     --lr-scheduler $sch --opt $opt --lr $lr --gamma $gamma --resume
 

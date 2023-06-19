@@ -70,9 +70,10 @@ class ClfStem(nn.Module):
                  padding=1,
                  maxpool=None,
                  stem_weight=None,
+                 bias=False,
                  activation_function=nn.ReLU(inplace=True)) -> None:
         super().__init__()
-        self.conv = nn.Conv2d(sample_dimension, out_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=False)
+        self.conv = nn.Conv2d(sample_dimension, out_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=bias)
         self.bn = nn.BatchNorm2d(out_channels)
         
         self.activation = activation_function

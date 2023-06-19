@@ -17,43 +17,42 @@ BREAK=False
 
 
 class LossCalculator:
-    def __init__(self, type, data_cats, loss_ratio, task_weights=None, weighting_method=None) -> None:
-        self.type = type
+    def __init__(self, data_cats, loss_ratio, task_weights=None, weighting_method=None) -> None:
         self.weighting_method = weighting_method
         self.data_cats = data_cats
-        
-        if self.type == 'balancing':
-            assert loss_ratio is not None
-            self.loss_ratio = loss_ratio
-            
-            self.loss_calculator = self.balancing_loss
-        
-        elif self.type == 'general':
-            self.loss_calculator = self.general_loss
-            
+        self.loss_ratio = loss_ratio
     
-    def balancing_loss(self, output_losses):
+    
+    def merge_all_losses(self, output_losses):
         assert isinstance(output_losses, dict)
-        losses = 0.
-        balanced_losses = dict()
-        for data in self.data_cats:
-            data_loss = sum(loss for k, loss in output_losses.items() if data in k)
-            data_loss *= self.loss_ratio[data]
-            balanced_losses.update({f"bal({str(self.loss_ratio[data])})_{self.data_cats[data]}_{data}": data_loss})
-            losses += data_loss
-        return losses, balanced_losses
-    
-    
-    def general_loss(self, output_losses):
-        assert isinstance(output_losses, dict)
-        
         logging_dict = None
-        if self.weighting_method is None: losses = sum(loss for loss in output_losses.values())
-        else:
-            task_losses = {data: sum(loss for k, loss in output_losses.items() if data in k) for data in self.data_cats}
-            logging_dict = self.weighting_method(task_losses)
-            losses = sum(loss for loss in logging_dict.values())
+        
+        if self.weighting_method is None: 
+            if self.loss_ratio is not None:
+                assert isinstance(self.loss_ratio, dict)
+                for key, ratio in self.loss_ratio.items():
+                    output_losses.update({k: v*ratio for k, v in output_losses.items() if key in k})    
+            losses = sum(loss for loss in output_losses.values())
             
+        else:
+            task_losses = {}
+
+            if self.loss_ratio is not None:
+                assert isinstance(self.loss_ratio, dict)
+                
+                for key, ratio in self.loss_ratio.items():
+                    output_losses.update({k: v*ratio for k, v in output_losses.items() if key in k})   
+                    
+            for data in self.data_cats:
+                data_loss = sum(loss for k, loss in output_losses.items() if data in k)
+                task_losses[data] = data_loss
+             
+            logging_dict = self.weighting_method(task_losses)
+            if logging_dict is None:
+                losses = sum(loss for loss in output_losses.values())
+            else:
+                losses = sum(loss for loss in logging_dict.values())
+                
         return losses, logging_dict
 
 
@@ -61,11 +60,15 @@ def training(model, optimizer, data_loaders,
           epoch, logger, 
           tb_logger, scaler, args,
           warmup_sch=None):
+    # torch.autograd.set_detect_anomaly(True)
     model.train()
     module = model.module
     
     metric_logger = metric_utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter("main_lr", metric_utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
+    
+    if len(optimizer.param_groups) > 1:
+        metric_logger.add_meter("enc_lr", metric_utils.SmoothedValue(window_size=1, fmt="{value:.6f}"))
     
     input_dicts = OrderedDict()
     
@@ -87,7 +90,7 @@ def training(model, optimizer, data_loaders,
     metric_logger.set_before_train(header)
     
     if warmup_sch:
-        logger.log_text(f"Warmup Iteration: {int(warmup_sch.total_iters)}/{biggest_size}")
+        logger.log_text(f"Warmup Iteration: {int(warmup_sch.total_iters)}")
     else:
         logger.log_text("No Warmup Training")
     
@@ -97,12 +100,8 @@ def training(model, optimizer, data_loaders,
     if grad_method is not None:
         if hasattr(grad_method, "set_epoch"): grad_method.set_epoch(epoch)
         
-    if args.lossbal:
-        loss_calculator = LossCalculator(
-            'balancing', args.task_per_dset, args.loss_ratio, weighting_method=weighting_method)
-    elif args.general:
-        loss_calculator = LossCalculator(
-            'general', args.task_per_dset, args.loss_ratio, weighting_method=weighting_method)
+    loss_calculator = LossCalculator(
+            args.task_per_dset, args.loss_ratio, weighting_method=weighting_method)
     
     start_time = time.time()
     end = time.time()
@@ -110,11 +109,6 @@ def training(model, optimizer, data_loaders,
     other_args = {"task_list": args.task_per_dset, "current_epoch": epoch}
     
     all_iter_losses = []
-    
-    if args.grad_clip_value is not None:
-        clip_value = torch.tensor(args.grad_clip_value, dtype=torch.float)
-        min_grad = torch.neg(clip_value) if clip_value > 0 else clip_value
-        max_grad = clip_value if clip_value > 0 else torch.neg(clip_value)
     
     for i, b_data in enumerate(biggest_dl):
         # print("iteration ",i)
@@ -148,9 +142,6 @@ def training(model, optimizer, data_loaders,
                 if not others_dsets[n_task] in input_dicts.keys():
                     input_dicts[others_dsets[n_task]] = next(others_iterator[n_task])
 
-        # finally:
-        #     torch.cuda.synchronize()
-            
         if args.return_count:
             input_dicts.update({'load_count': load_cnt})
         
@@ -161,60 +152,54 @@ def training(model, optimizer, data_loaders,
         with torch.cuda.amp.autocast(enabled=scaler is not None):
             for ti, dset in enumerate(datasets):
                 task_loss = module(input_set[dset], {'dataset': dset})
+                # for k, v in task_loss.items():
+                #     if torch.isnan(v):
+                #         print(k, v)
                 loss_dict.update(task_loss)
-            
-        losses, logging_dict = loss_calculator.loss_calculator(loss_dict)
+        
+        
+        
+        losses, logging_dict = loss_calculator.merge_all_losses(loss_dict)
         if logging_dict is not None:
             loss_dict.update(logging_dict)
         
-        loss_dict_reduced = metric_utils.reduce_dict(loss_dict, average=False)
+        loss_dict_reduced = metric_utils.reduce_dict(loss_dict, average=True)
         losses_reduced = sum(loss for loss in loss_dict_reduced.values())
         loss_value = losses_reduced.item()
         if not math.isfinite(loss_value):
+            logger.log_text(f"loss dict: {loss_dict}")
             logger.log_text(f"Loss is {loss_value}, stopping training\n\t{loss_dict_reduced}", level='error')
+            
+            # for n, p in module.named_parameters():
+            #     if torch.any(torch.isnan(p)):
+            #         logger.log_text(f"nan weight in {n}", level='error')
+            #     if p.grad is not None:
+            #         if torch.any(torch.isnan(p.grad)): logger.log_text(f"nan gradient in {n}", level='error')
+            
             sys.exit(1)
         
         list_losses = list(loss_dict_reduced.values())
         list_losses.append(losses_reduced)
         all_iter_losses.append(list_losses)
         
-        if scaler is not None:
-            assert losses.dtype is torch.float32
-            optimizer.zero_grad(set_to_none=args.grad_to_none)
-            scaler.scale(losses).backward()
-            
-            if args.grad_clip_value is not None:
-                scaler.unscale_(optimizer) # this must require to get clipped gradients.
-                for p in module.parameters():
-                    if p.requires_grad and p.grad is not None: torch.clamp_(p.grad, min=min_grad, max=max_grad)
-                
-            scaler.step(optimizer)
-            scaler.update()
-            
+        optimizer.zero_grad(set_to_none=args.grad_to_none)
+        losses.backward()
         
-        else:
-            optimizer.zero_grad(set_to_none=args.grad_to_none)
-            losses.backward()
+        if grad_method is not None:
+            module.compute_newgrads(
+                origin_grad=grad_dict,
+                cur_iter=i, 
+                total_mean_grad=args.total_mean_grad)
             
-            if grad_method is not None:
-                module.compute_newgrads(
-                    origin_grad=grad_dict,
-                    cur_iter=i, 
-                    total_mean_grad=args.total_mean_grad)
-            
-            for n, p in module.named_parameters():
-                if not 'encoder' in n: 
-                    dist.all_reduce(p.grad)
-                    p.grad /= get_world_size()
-                    
-            # for dd in datasets:
-            #     for p in module.get_task_stem(dd).parameters(): dist.all_reduce(p.grad)
-            #     for pp in module.get_task_head(dd).parameters(): dist.all_reduce(pp.grad)
-            
-            optimizer.step()  
-            
-            
-                    
+        for n, p in module.named_parameters():
+            dist.all_reduce(p.grad)
+        
+        if args.grad_clip_value is not None:
+            for smodel in module.task_single_network.values():
+                torch.nn.utils.clip_grad_norm_([p for p in smodel.parameters() if p.requires_grad],
+                                                args.grad_clip_value)
+         
+        optimizer.step()  
             
         # for n, p in model.named_parameters():
         #     if p.grad is None:
@@ -224,8 +209,11 @@ def training(model, optimizer, data_loaders,
         if warmup_sch is not None:
             warmup_sch.step()
         
-        dist.all_reduce(losses)
+        # dist.all_reduce(losses)
         metric_logger.update(main_lr=optimizer.param_groups[0]["lr"])
+        if len(optimizer.param_groups) > 1:
+            metric_logger.update(enc_lr=optimizer.param_groups[1]["lr"])
+        
         metric_logger.update(loss=losses, **loss_dict_reduced)
         iter_time.update(time.time() - end) 
         
@@ -256,7 +244,7 @@ def training(model, optimizer, data_loaders,
             '''
             
         # if BREAK and i == args.print_freq:
-        if BREAK and i == 10:
+        if BREAK and i == 3:
             print("BREAK!!")
             # torch.cuda.synchronize()
             break
@@ -367,19 +355,86 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         
         return coco_evaluator.coco_eval['bbox'].stats[0] * 100.
     
-    
+    ##############################################################################################################################
     def _validate_segmentation(outputs, targets, start_time=None):
-        confmat.update(targets.flatten(), outputs['outputs'].argmax(1).flatten())
+        confmat.update(outputs.argmax(1).flatten(), targets.flatten())
+        # confmat.update(targets.flatten(), outputs['outputs'].argmax(1).flatten())
+    
+    def _validate_depth(outputs, targets):
+        depth_metrics.update(outputs, targets)
         
+    def _validate_surface_normal(outputs, targets):
+        surface_normal_metrics.update(outputs, targets)
         
+    def _validate_keypoint(outputs, targets):
+        keypoint_metrics.update(outputs, targets)
+        
+    def _validate_edge(outputs, targets):
+        edge_metrics.update(outputs, targets)
+    ##############################################################################################################################  
+    
+    
+    ##############################################################################################################################
     def _metric_segmentation():
         # print("######### entered seg metirc")
-        confmat.reduce_from_all_processes()
+        # confmat.reduce_from_all_processes()
+        # logger.log_text("<Current Step Eval Accuracy>\n{}".format(confmat))
+        
+        confmat.compute()
+        # confmat.reduce_from_all_processes()
         logger.log_text("<Current Step Eval Accuracy>\n{}".format(confmat))
-        return confmat.mean_iou
+        
+        return {'mIoU': confmat.mean_iou.item(), 'pixel_acc': confmat.pixelAcc.item()}
+    
+    def _metric_depth():
+        depth_metrics.compute()
+        depth_metrics.reduce_from_all_processes()
+        logger.log_text(f"<Depth Estimation Results>:\n{str(depth_metrics)}")
+        
+        # mean_results = sum(v for v in depth_metrics.val_metrics.values()) / len(depth_metrics.val_metrics)
+        depth_metrics.reset
+        
+        # return {"avg": mean_results, "val_metrics": depth_metrics.val_metrics}
+        return depth_metrics.val_metrics
+    
+    def _metric_surface_normal():
+        surface_normal_metrics.compute()
+        surface_normal_metrics.reduce_from_all_processes()
+        logger.log_text(f"<Surface Normal Estimation Results>:\n{str(surface_normal_metrics)}")
+        
+        # mean_results = sum(v for v in surface_normal_metrics.val_metrics.values()) / len(surface_normal_metrics.val_metrics)
+        surface_normal_metrics.reset
+        
+        # return {"avg": mean_results, "val_metrics": surface_normal_metrics.val_metrics}
+        return surface_normal_metrics.val_metrics
+    
+    def _metric_keypoint():
+        keypoint_metrics.compute()
+        keypoint_metrics.reduce_from_all_processes()
+        logger.log_text(f"<2D Keypoint Estimation Results>:\n{str(keypoint_metrics)}")
+        
+        # mean_results = sum(v for v in depth_metrics.val_metrics.values()) / len(depth_metrics.val_metrics)
+        keypoint_metrics.reset
+        
+        # return {"avg": mean_results, "val_metrics": depth_metrics.val_metrics}
+        return keypoint_metrics.val_metrics
+    
+    def _metric_edge():
+        edge_metrics.compute()
+        edge_metrics.reduce_from_all_processes()
+        logger.log_text(f"<2D Edge Estimation Results>:\n{str(edge_metrics)}")
+        
+        # mean_results = sum(v for v in depth_metrics.val_metrics.values()) / len(depth_metrics.val_metrics)
+        edge_metrics.reset
+        
+        # return {"avg": mean_results, "val_metrics": depth_metrics.val_metrics}
+        return edge_metrics.val_metrics
+    
+    ##############################################################################################################################
     
     
-    def _select_metric_fn(task, datatype):
+    ##############################################################################################################################
+    def _select_metric_fn(task, datatype, detail_type=None):
         if task == 'clf':
             return _metric_classification
         
@@ -390,14 +445,34 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
                 pass
             
         elif task == 'seg':
-            if 'coco' in datatype:
-                pass
-            elif ('voc' in datatype) \
-                or ('cityscapes' in datatype):
-                    return _metric_segmentation
-
-                
-    def _select_val_fn(task, datatype):
+            assert detail_type is not None
+            if detail_type == "sseg":
+                return _metric_segmentation
+            elif detail_type == "depth":
+                return _metric_depth
+            elif detail_type == "sn":
+                return _metric_surface_normal
+            elif detail_type == "keypoint":
+                return _metric_keypoint
+            elif detail_type == "edge":
+                return _metric_edge
+            
+            # if 'coco' in datatype:
+            #     pass
+            # elif 'voc' in datatype:
+            #     return _metric_segmentation
+            
+            # elif 'cityscapes' in datatype:
+            #     assert detail_type is not None
+            #     if detail_type == "sseg":
+            #         return _metric_segmentation
+            #     elif detail_type == "depth":
+            #         return _metric_depth
+    ##############################################################################################################################
+             
+             
+    ##############################################################################################################################   
+    def _select_val_fn(task, datatype, detail_type=None):
         if task == 'clf':
             return _validate_classification
         elif task == 'det':
@@ -407,12 +482,31 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
                 pass
             
         elif task == 'seg':
-            if 'coco' in datatype:
-                pass
-            
-            elif ('voc' in datatype) \
-                or ('cityscapes' in datatype):
+            assert detail_type is not None
+            if detail_type == "sseg":
                 return _validate_segmentation
+            elif detail_type == "depth":
+                return _validate_depth
+            elif detail_type == "sn":
+                return _validate_surface_normal
+            elif detail_type == "keypoint":
+                return _validate_keypoint
+            elif detail_type == "edge":
+                return _validate_edge
+            
+            # if 'coco' in datatype:
+            #     pass
+            # elif 'voc' in datatype:
+            #     return _validate_segmentation
+            
+            # elif 'cityscapes' in datatype:
+            #     assert detail_type is not None
+            #     if detail_type == "sseg":
+            #         return _validate_segmentation
+            #     elif detail_type == "depth":
+            #         return _validate_depth
+    ##############################################################################################################################
+    
     
     
     final_results = dict()
@@ -426,7 +520,8 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
     # from ptflops import get_model_complexity_info
     from lib.utils.flop_counters.ptflops import get_model_complexity_info
     for dataset, taskloader in data_loaders.items():
-        # if not 'voc' in dataset: continue
+        # if not dataset in ["voc", "nyuv2", "cityscapes"]: continue
+        
         task = data_cats[dataset]
         dset_classes = num_classes[dataset]
         
@@ -436,16 +531,29 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
             coco_evaluator = CocoEvaluator(coco, iou_types)
             coco_evaluator.set_logger_to_pycocotools(logger)
         
-        val_function = _select_val_fn(task, dataset)
-        metric_function = _select_metric_fn(task, dataset)
+        confmat = None
+        if task == 'seg':
+            val_function = {detail_type: _select_val_fn(task, dataset, detail_type) for detail_type in dset_classes.keys()}
+            metric_function = {detail_type: _select_metric_fn(task, dataset, detail_type) for detail_type in dset_classes.keys()}
+            
+            if 'sseg' in dset_classes:
+                confmat = metric_utils.ConfusionMatrix(dset_classes['sseg'])
+            if "depth" in dset_classes:
+                depth_metrics = metric_utils.DepthMetric(dataset)
+            if "sn" in dset_classes:
+                surface_normal_metrics = metric_utils.SurfaceNormalMetric()
+            if "keypoint" in dset_classes:
+                keypoint_metrics = metric_utils.KeypointMetric()
+            if "edge" in dset_classes:
+                edge_metrics = metric_utils.EdgeMetric()
+        
+        else:
+            val_function = _select_val_fn(task, dataset)
+            metric_function = _select_metric_fn(task, dataset)
         metric_logger = metric_utils.MetricLogger(delimiter="  ")
         
         assert val_function is not None
         assert metric_function is not None
-        
-        confmat = None
-        if task == 'seg':
-            confmat = metric_utils.ConfusionMatrix(dset_classes)
         
         header = "Validation - " + dataset.upper() + ":"
         iter_time = metric_utils.SmoothedValue(fmt="{avg:.4f}")
@@ -470,7 +578,7 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
             '''
             batch_set = metric_utils.preprocess_data(batch_set, data_cats)
             
-            if i == 0: batch_size = len(batch_set[dataset])
+            batch_size += len(batch_set[dataset])
 
             iter_start_time = time.time()
             macs, _, outputs = get_model_complexity_info(
@@ -481,7 +589,21 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
             torch.cuda.synchronize()
             iter_time.update(time.time() - iter_start_time) 
             mac_count += macs
-            val_function(outputs, batch_set[dataset][1], iter_start_time)
+            
+            if task == 'seg':
+                for detail_type, val_func in val_function.items():
+                    val_func(outputs[detail_type], batch_set[dataset][1][detail_type])
+                    if detail_type == "sseg":
+                        confmat.total_batch_size.append(len(batch_set[dataset][0]))
+                    elif detail_type == "depth":
+                        depth_metrics.total_batch_size.append(len(batch_set[dataset][0]))
+                    elif detail_type == "keypoint":
+                        keypoint_metrics.total_batch_size.append(len(batch_set[dataset][0]))
+                    elif detail_type == "edge":
+                        edge_metrics.total_batch_size.append(len(batch_set[dataset][0]))
+                    
+            else:
+                val_function(outputs, batch_set[dataset][1], iter_start_time)
             
             # if i == 9: break
             
@@ -506,6 +628,7 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
             #     break
             
             torch.cuda.synchronize()
+        
         total_end_time = time.time() - total_start_time
         
         all_time_str = str(datetime.timedelta(seconds=int(total_end_time)))
@@ -531,8 +654,40 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
         time.sleep(2)
         if torch.cuda.is_available():
             torch.cuda.synchronize(torch.cuda.current_device)
-        eval_result = metric_function()
-        final_results[dataset] = eval_result
+        
+        if task == "seg":
+            for detail_type, met_func in metric_function.items():
+                eval_result = met_func()
+                name = f"{dataset}_{detail_type}"
+                
+                # final_results[name] = eval_result
+                
+                if detail_type in ["depth", "sn", "keypoint", "edge"]:
+                    if detail_type == "depth":
+                        lower_metrics = depth_metrics.lower_better
+                    elif detail_type == "sn":
+                        lower_metrics = surface_normal_metrics.lower_better
+                    elif detail_type == "keypoint":
+                        lower_metrics = keypoint_metrics.lower_better
+                    elif detail_type == "edge":
+                        lower_metrics = edge_metrics.lower_better    
+                    
+                    for m_type in eval_result.keys():
+                        if m_type in lower_metrics:
+                            deg_name = f"{name}_{m_type}_low"
+                        else:
+                            deg_name = f"{name}_{m_type}"
+                        final_results[deg_name] = eval_result[m_type]
+                
+                else:                    
+                    if isinstance(eval_result, dict):
+                        final_results.update({f"{name}_{k}": v for k, v in eval_result.items()})
+                    else:
+                        final_results[name] = eval_result
+                
+        else:
+            eval_result = metric_function()
+            final_results[dataset] = eval_result
         
         del taskloader
         time.sleep(1)
@@ -543,48 +698,3 @@ def evaluate(model, data_loaders, data_cats, logger, num_classes):
     
     return final_results
     
-
-
-
-# loss_dict = {}
-        # grad_dict = {}
-        # weighted_loss = 0
-        # logging_dict = None
-        # with torch.cuda.amp.autocast(enabled=scaler is not None):
-        #     if grad_method is None:
-        #         loss_dict = module(input_dicts, other_args)
-            
-        #     else:
-        #         for ti, dset in enumerate(datasets):
-        #             task_loss = module(input_set[dset], {'dataset': dset})
-                    
-        #             loss_dict.update(task_loss)
-        #             if weighting_method is not None:
-        #                 loss, logging_dict = loss_calculator.loss_calculator(task_loss)
-        #                 weighted_loss += loss
-        #                 loss_dict.update(logging_dict)
-                        
-        #             else:
-        #                 loss = sum(l for l in task_loss.values())
-                        
-        #             loss.backward()
-                    
-        #             # if args.grad_clip_value is not None:
-        #             #     torch.nn.utils.clip_grad_norm_( # clip gradient values to maximum 1.0
-        #             #         [p for p in module.get_network(dset).parameters() if p.requires_grad],
-        #             #         args.grad_clip_value)
-                    
-        #             grad_dict[dset] = module.grad2vec(dset, clone_grad=True)
-        #             # dist.all_reduce(grad_dict[dset])
-                    
-        #             # task_grads = module.grad2vec(dset, clone_grad=True)
-        #             # dist.all_reduce(task_grads)
-        #             # grad_dict[dset] = task_grads / dist.get_world_size()
-        #             # print(grad_dict[dset], grad_dict[dset].norm())
-           
-        # if weighted_loss != 0:
-        #     losses = weighted_loss
-        # else:
-        #     losses, logging_dict = loss_calculator.loss_calculator(loss_dict)                     
-        #     # if logging_dict is not None:
-        #     #     loss_dict.update(logging_dict)

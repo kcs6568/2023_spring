@@ -78,21 +78,48 @@ def set_args(args):
     #     args.task = [task for task in args.task_cfg.keys() if args.task is not None]
     # elif len(args.task_bs) > 3:
     #     args.task = [task for task in args.task_cfg.keys() if args.task_cfg[task] is not None]
+    
+    task_list = []
+    for dataset, cfg in args.task_cfg.items():
+        if cfg["task"] == "seg":
+            for dt in cfg["num_classes"].keys():
+                task = f"{dataset}_{dt}"
+                task_list.append(task)
+        else:
+            task_list.append(dataset)
+    args.detailed_task = task_list
     args.task = [task for task in args.task_cfg.keys()]
     
     args.all_data_size = {dset: 0 for dset in args.task}
     
-    num_task = ""
-    if args.num_datasets == 1:
-        num_task = "single"
-    elif args.num_datasets == 2:
-        num_task = "multiple"
-    elif args.num_datasets == 3:
-        num_task = "triple"
-    elif args.num_datasets == 4:
-        num_task = "quadruple"
-    elif args.num_datasets == 5:
-        num_task = "quintuple"
+    num_datasets = f"{args.num_datasets}D"
+    num_tasks = f"{len(task_list)}T"
+    
+    # num_task = ""
+    # if args.num_datasets == 1:
+    #     num_task = "single"
+    # elif args.num_datasets == 2:
+    #     num_task = "multiple"
+    # elif args.num_datasets == 3:
+    #     num_task = "triple"
+    # elif args.num_datasets == 4:
+    #     num_task = "quadruple"
+    # elif args.num_datasets == 5:
+    #     num_task = "quintuple"
+    # elif args.num_datasets == 6:
+    #     num_task = "six"
+    # elif args.num_datasets == 7:
+    #     num_task = "seven"
+    # elif args.num_datasets == 8:
+    #     num_task = "eight"
+    # elif args.num_datasets == 9:
+    #     num_task = "nine"
+    # elif args.num_datasets == 10:
+    #     num_task = "ten"
+    # elif args.num_datasets == 11:
+    #     num_task = "eleven"
+    # elif args.num_datasets == 12:
+    #     num_task = "twelve"
     
     if 'gating' in args.approach:
         if args.baseline_args['retrain_phase']:
@@ -104,13 +131,16 @@ def set_args(args):
         #     args.output_dir, args.model, num_task, args.dataset, args.method)
         
         args.output_dir = os.path.join(
-            args.output_dir, args.model, num_task, args.dataset)
+            args.output_dir, 
+            args.model, 
+            num_datasets, 
+            num_tasks,
+            args.dataset, 
+            args.approach, 
+            args.method)
         
-        # if torch.cuda.device_count() == 1:
-        #     args.output_dir = os.path.join(args.output_dir, "single_GPU")
-            
-        args.output_dir = os.path.join(
-            args.output_dir, args.approach, args.method)
+        # args.output_dir = os.path.join(
+        #     args.output_dir, args.approach, args.method)
         
         if args.exp_case:
             args.output_dir = os.path.join(args.output_dir, args.exp_case)

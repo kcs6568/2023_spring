@@ -128,16 +128,34 @@ def main(args):
         else: gating_path = retrain_args['gated_weight']
         gated_weight = torch.load(gating_path, map_location=torch.device('cpu'))['model']
         
-        ignore_keys = ['weighting_method', 'grad_method']
+        ignore_keys = []
+        if model.grad_method is None: ignore_keys.append("grad_method")
+        if model.weighting_method is None: ignore_keys.append("weighting_method")
         
-        if ignore_keys is not None:
-            with torch.no_grad():
-                for n, p in model.named_parameters():
-                    checklist = torch.zeros(len(ignore_keys)).bool()
-                    for i in range(len(ignore_keys)): checklist[i] = ignore_keys[i] in n
-                    if not torch.all(checklist): p.copy_(gated_weight[n])
+        if len(ignore_keys) > 0:
+            new_weight = {}
+            
+            for n, p in gated_weight.items():
+                for ign_key in ignore_keys:
+                    if not ign_key in n: new_weight.update({n: p})
+
+            model.load_state_dict(new_weight, strict=False)
+            
         else:
-            model.load_state_dict(gated_weight['model'], strict=False)
+            model.load_state_dict(gated_weight, strict=False)
+                        
+        
+        
+        # ignore_keys = ['weighting_method', 'grad_method']
+        
+        # if ignore_keys is not None:
+        #     with torch.no_grad():
+        #         for n, p in model.named_parameters():
+        #             checklist = torch.zeros(len(ignore_keys)).bool()
+        #             for i in range(len(ignore_keys)): checklist[i] = ignore_keys[i] in n
+        #             if not torch.all(checklist): p.copy_(gated_weight[n])
+        # else:
+        #     model.load_state_dict(gated_weight['model'], strict=False)
             
         # for dset, gate in model.task_gating_params.items():
         #     print(dset)
@@ -338,16 +356,20 @@ def main(args):
         if args.resume_tmp:
             args.resume_tmp = False
 
-    if args.start_epoch > 0: warmup_sch = None
-
-    else:
+    if args.warmup:
         if args.start_epoch <= args.warmup_epoch:
-            if args.warmup_epoch > 1:
-                args.warmup_ratio = 1
             biggest_size = len(list(train_loaders.values())[0])
-            warmup_sch = get_warmup_scheduler(optimizer, args.warmup_ratio, biggest_size * args.warmup_epoch)
-        else:
-            warmup_sch = None
+            if args.warmup_epoch > 1:
+                total_iters = biggest_size * args.warmup_epoch
+                args.warmup_ratio = 1
+            
+            else:
+                total_iters = args.warmup_iters
+                args.warmup_epoch = 1
+                
+            warmup_sch = get_warmup_scheduler(optimizer, args.warmup_ratio, total_iters)
+    else:
+        warmup_sch = None
     
     logger.log_text(f"Parer Arguments:\n{args}")
 
@@ -457,32 +479,54 @@ def main(args):
             for dset, mac in results["task_flops"].items():
                 task_flops[dset].append(mac)
         
-        task_save = {dset: False for dset in args.task}
-        
+        #TODO modulation for validation
+        task_save = {}
         tmp_acc = []
         line = '<Compare with Best>\n'
-        for data in args.task:
-            v = results[data]
-            tmp_acc.append(v)
-            line += '\t{}: Current Perf. || Previous Best: {} || {}\n'.format(
-                data.upper(), v, best_results[data]
-            )
+        for data in args.detailed_task:
+            tmp_results = {k: res for k, res in results.items() if data in k}
             
-            if not math.isfinite(v):
-                logger.log_text(f"Performance of data {data} is nan.")
-                v == 0.
+            for k, res in tmp_results.items():
+                if not torch.isnan(torch.tensor(res)):
+                    res = round(res, 3)
+                    
+                tmp_acc.append(res)
+                if k not in best_results:
+                    if "low" in k: 
+                        best_results[k] = 100.
+                    else:
+                        best_results[k] = 0.
+                if k not in best_epoch:
+                    best_epoch[k] = 0
                 
-            if v > best_results[data]:
-                best_results[data] = round(v, 2)
-                best_epoch[data] = epoch
-                task_save[data] = True
-            else:
-                task_save[data] = False
+                line += '\t{}: Current Perf. || Previous Best: {} || {}\n'.format(
+                    k.upper(), res, best_results[k]
+                )
+
+                if "low" in k:
+                    if res < best_results[k]:
+                        best_results[k] = round(res, 3)
+                        best_epoch[k] = epoch
+                        task_save[k] = True
+                    else:
+                        task_save[k] = False
+                else:
+                    if res > best_results[k]:
+                        best_results[k] = round(res, 3)
+                        best_epoch[k] = epoch
+                        task_save[k] = True
+                    else:
+                        task_save[k] = False
         
         task_acc.append(tmp_acc)
         
-        logger.log_text(line)  
-        logger.log_text(f"Best Epcoh per data: {best_epoch}")
+        logger.log_text(line)
+        
+        be_line = "Best Epcoh per data:\n"
+        for task_k, b_e in best_epoch.items():
+            be_line += f" - {task_k}: {b_e}\n"
+        logger.log_text(be_line + "\n") 
+        
         checkpoint['best_results'] = best_results
         checkpoint['last_results'] = results
         checkpoint['best_epoch'] = best_epoch

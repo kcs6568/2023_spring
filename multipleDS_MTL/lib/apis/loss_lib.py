@@ -1,5 +1,7 @@
 from collections import OrderedDict
 
+import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -176,100 +178,6 @@ def cross_entropy_loss_with_aux(logits, targets):
     return losses
 
 
-def shared_gate_loss(gate_logits, tasks, num_blocks, same_loss_weight=True):
-    # loss_weights = torch.tensor([(num_blocks - (i))/num_blocks for i in range(num_blocks)]).float().cuda()
-    # loss_weights = torch.tensor([(num_blocks//2 - (i))/(num_blocks//2) for i in range(num_blocks//2)]).float().cuda()
-    # loss_weights = torch.cat((loss_weights, reversed(loss_weights)), dim=0).cuda()
-    # loss_weights[:fixed_gate] = 1
-    
-    if same_loss_weight:
-        loss_weights = torch.tensor([1 for _ in range(num_blocks)]).float().cuda()
-    else:
-        loss_weights = torch.tensor([(num_blocks//2 - (i))/(num_blocks//2) for i in range(num_blocks//2)]).float()
-        # loss_weights = torch.tensor([(i+1)/(num_blocks//2) for i in range(num_blocks//2)]).float()
-        loss_weights = torch.cat((loss_weights, reversed(loss_weights)), dim=0).cuda()
-        
-    
-    # if len(tasks) == 3:
-    #     sharing_loss = gate_logits[tasks[0]][:, 0] - gate_logits[tasks[1]][:, 0] \
-    #         - gate_logits[tasks[2]][:, 0]
-    # elif len(tasks) == 4:
-    #     sharing_loss = (gate_logits[tasks[0]][:, 0] - gate_logits[tasks[1]][:, 0] \
-    #         - gate_logits[tasks[2]][:, 0] - gate_logits[tasks[3]][:, 0])
-    
-    # sharing_loss = torch.sum(loss_weights * torch.abs(sharing_loss))
-    
-    task_len = len(tasks)
-    sharing_loss = \
-        sum(
-            sum(loss_weights * torch.abs(gate_logits[tasks[i]][:, 0] - gate_logits[tasks[j]][:, 0]) \
-                for j in range(i+1, task_len)) \
-                    for i in range(task_len))
-    
-    sharing_loss = torch.sum(sharing_loss)
-    
-    return sharing_loss
-
-
-def non_shared_gate_loss(gate_logits, tasks):
-    # loss_weights = torch.tensor([(num_blocks - (i+1))/num_blocks for i in range(16)]).float().cuda()
-    # loss_weights = torch.arange(num_blocks, 0, -1).float()
-    # loss_weights = torch.softmax(loss_weights, 0).cuda()
-    
-    # loss_weights = torch.tensor([(num_blocks//2 - (i+1))/(num_blocks//2) for i in range(num_blocks//2)]).float().cuda()
-    # loss_weights = torch.cat((loss_weights, reversed(loss_weights)), dim=0).cuda()
-    
-    if len(tasks) == 3:
-        non_sharing_loss = gate_logits[tasks[0]][:, 1] - gate_logits[tasks[1]][:, 1] \
-            - gate_logits[tasks[2]][:, 1]
-    elif len(tasks) == 4:
-        non_sharing_loss = (gate_logits[tasks[0]][:, 1] - gate_logits[tasks[1]][:, 1] \
-            - gate_logits[tasks[2]][:, 1] - gate_logits[tasks[3]][:, 1])
-        
-    non_sharing_loss = torch.sum(torch.abs(non_sharing_loss))
-    
-    return non_sharing_loss
-
-
-def disjointed_prob_loss(gate_logits, num_blocks, sparsity_weight=1.0, smoothing_alpha=None, return_sum=True):
-    loss = 0.
-    gt = torch.zeros(num_blocks).long().cuda()    
-        
-    # for dset in tasks:
-    #     loss += F.cross_entropy(gate_logits[dset], gt)
-    
-    # if return_sum:    
-    #     for logit in gate_logits.values():
-    #         loss += F.cross_entropy(logit, gt)
-            
-    # else:
-    #     loss = {}
-    #     for data, logit in gate_logits.items(): loss[data] = F.cross_entropy(logit, gt)
-    
-    all_loss = []
-    
-    for prob_idx in range(len(gate_logits[0])):
-        loss = F.l1_loss(gate_logits[:, prob_idx], gt) * sparsity_weight
-        all_loss.append(loss)
-        
-    if return_sum: return sum(all_loss)
-    else: return {f"{k}_sparsity_loss": all_loss[i] for i, k in enumerate(gate_logits.keys())}
-    
-    
-    # if isinstance(gate_logits, (nn.ParameterDict, dict)):
-    #     for prob in gate_logits.values():
-    #         loss = F.l1_loss(prob, gt) * sparsity_weight
-    #         all_loss.append(loss)
-            
-    #     if return_sum: return sum(all_loss)
-    #     else: return {f"{k}_sparsity_loss": all_loss[i] for i, k in enumerate(gate_logits.keys())}
-        
-    # else:
-    #     loss = F.cross_entropy(gate_logits, gt) * sparsity_weight
-    #     return loss
-
-
-
 def disjointed_policy_loss(gate_logits, num_blocks, lambda_sparsity,
                            sparsity_weight=1.0, smoothing_alpha=None, return_sum=True):
     loss = 0.
@@ -310,91 +218,159 @@ def disjointed_policy_loss(gate_logits, num_blocks, lambda_sparsity,
     else: return {f"{k}_sparsity_loss": all_loss[i] for i, k in enumerate(gate_logits.keys())}
         
 
+    
 
-def disjointed_gate_loss(gate_logits, tasks, num_blocks, smoothing_alpha=None, sparsity_weight=None):
-    loss = 0.
-    if smoothing_alpha is not None:
-        gt_ = torch.ones(num_blocks, 2).long().cuda()
-        gt = torch.tensor([[l*(1-smoothing_alpha) + smoothing_alpha/len(oh) for l in oh] for i, oh in enumerate(gt_)]).float().cuda()
+class EdgeLoss(nn.Module):
+    # def __init__(self, dataset, raw_shape=(321, 321), depth_mask=None):
+    def __init__(self, dataset, aux_ratio=0.5):
+        super(EdgeLoss, self).__init__()
+        self.dataset = dataset
+        # self.raw_shape = raw_shape
+        self.loss_fn = nn.L1Loss()
+        self.aux_ratio = aux_ratio
+    
+    
+    def compute_loss(self, pred, gt, is_aux=False):
+        if self.dataset == "taskonomy":
+            binary_mask = gt != 255
         
-    else:
-        gt = torch.ones(num_blocks).long().cuda()    
-    # print(sparsity_weight)
-    if sparsity_weight is None:
-        for dset in tasks:
-            loss += F.cross_entropy(gate_logits[dset], gt)
-    else:
-        for dset, s_type in sparsity_weight.items():
-            # print(dset, s_type)
-            if isinstance(s_type, float):
-                task_loss = s_type * F.cross_entropy(gate_logits[dset], gt)
-                # print(dset, s_type, task_loss)
-                loss += task_loss
+        prediction = pred.masked_select(binary_mask)
+        key_gt = gt.masked_select(binary_mask)
+        losses = self.loss_fn(prediction, key_gt)
+        
+        if is_aux:
+            return losses * self.aux_ratio
+        else: return losses
+    
+    
+class KeypointLoss(nn.Module):
+    # def __init__(self, dataset, raw_shape=(321, 321), depth_mask=None):
+    def __init__(self, dataset, aux_ratio=0.5):
+        super(KeypointLoss, self).__init__()
+        self.dataset = dataset
+        # self.raw_shape = raw_shape
+        self.loss_fn = nn.L1Loss()
+        self.aux_ratio = aux_ratio
+    
+    
+    def compute_loss(self, pred, gt, is_aux=False):
+        if self.dataset == "taskonomy":
+            binary_mask = gt != 255
+        
+        prediction = pred.masked_select(binary_mask)
+        key_gt = gt.masked_select(binary_mask)
+        losses = self.loss_fn(prediction, key_gt)
+        
+        if is_aux:
+            return losses * self.aux_ratio
+        else: return losses
+
+        
+class NormalLoss(nn.Module):
+    # def __init__(self, dataset, raw_shape=(321, 321), depth_mask=None):
+    def __init__(self, dataset, aux_ratio=0.5):
+        super(NormalLoss, self).__init__()
+        self.dataset = dataset
+        # self.raw_shape = raw_shape
+        self.loss_fn = nn.CosineSimilarity()
+        self.aux_ratio = aux_ratio
+    
+    
+    def compute_loss(self, pred, gt, is_aux=False):
+        prediction = pred.permute(0, 2, 3, 1).contiguous().view(-1, 3)
+        gt = gt.permute(0, 2, 3, 1).contiguous().view(-1, 3)
+        labels = (gt.max(dim=1)[0] < 255)
+        
+        # if hasattr(self, 'normal_mask'):
+        #     normal_mask_resize = F.interpolate(self.normal_mask.float(), size=pred.shape[-2:])
+        #     gt_mask = normal_mask_resize.permute(0, 2, 3, 1).contiguous().view(-1, 3)
+        #     labels = labels and gt_mask.int() == 1
+
+        prediction = prediction[labels]
+        gt = gt[labels]
+
+        prediction = F.normalize(prediction)
+        gt = F.normalize(gt)
+
+        losses = 1 - self.loss_fn(prediction, gt).mean()     
+        
+        if is_aux:
+            return losses * self.aux_ratio
+        else: return losses
+
+
+class DepthLoss(nn.Module):
+    # def __init__(self, dataset, raw_shape=(321, 321), depth_mask=None):
+    def __init__(self, dataset, depth_mask=None, aux_ratio=0.5):
+        super(DepthLoss, self).__init__()
+        self.dataset = dataset
+        # self.raw_shape = raw_shape
+        self.depth_mask = depth_mask
+        self.loss_fn = nn.L1Loss()
+        self.aux_ratio = aux_ratio
+    
+    
+    def compute_loss(self, pred, gt, is_aux=False):
+        if self.dataset in ['nyuv2', 'cityscapes']:
+            binary_mask = (torch.sum(gt, dim=1) > 3 * 1e-5).unsqueeze(1).cuda()
+        
+        elif self.dataset == 'taskonomy' and "mask" in gt:
+            assert gt["mask"] is not None
+            binary_mask = (gt["gt"] != 255) * (gt["mask"].int() == 1)
+            gt = gt["gt"]
+        else:
+            raise ValueError('Dataset %s is invalid' % self.dataset)
+        
+        depth_output = pred.masked_select(binary_mask)
+        depth_gt = gt.masked_select(binary_mask)
+        
+        # torch.sum(torch.abs(depth_pred - depth_resize) * binary_mask) / torch.nonzero(binary_mask).size(0)
+        losses = self.loss_fn(depth_output, depth_gt)
+        
+        if is_aux:
+            return losses * self.aux_ratio
+        else: return losses
+        
+
+class SemSegLoss:
+    def __init__(self, dataset, ignore_index=255, aux_ratio=0.5):
+        super(SemSegLoss, self).__init__()
+        self.dataset = dataset
+        
+        weight = None
+        if dataset == "cityscapes":
+            ignore_index = -1
+        else:
+            ignore_index = ignore_index
+            if dataset == "taskonomy":
+                weight = np.load("/root/data/tiny-taskonomy/semseg_prior_factor.npy")
+                weight = torch.from_numpy(weight).cuda().float()
             
-            else:
-                ce_loss = F.cross_entropy(gate_logits[dset], gt, reduction='none')
-                if s_type == 'b2t':
-                    s_weight = torch.tensor([(i+1) / num_blocks for i in range(num_blocks)]).float().cuda()
-                    # task_loss = torch.mean((s_weight * F.cross_entropy(gate_logits[dset], gt, reduction='none')))
-                    
-                elif s_type == 't2b':
-                    s_weight = torch.tensor([(num_blocks - i) / num_blocks for i in range(num_blocks)]).float().cuda()
-                    # task_loss = torch.mean((s_weight * F.cross_entropy(gate_logits[dset], gt, reduction='none')))
-                    
-                elif s_type == 'sym':
-                    s_weight = torch.tensor([(num_blocks//2 - (i))/(num_blocks//2) for i in range(num_blocks//2)]).float()
-                    s_weight = torch.cat((s_weight, reversed(s_weight)), dim=0).cuda()
-                    # task_loss = torch.mean((s_weight * F.cross_entropy(gate_logits[dset], gt, reduction='none')))
-                
-                # print(dset)
-                # print(ce_loss)
-                # print(s_weight)
-                task_loss = torch.mean(s_weight * ce_loss)
-                # print(task_loss)
-                loss += task_loss
-                # print(loss)
-                # print()
-                
-                
-                
+        self.loss_fn = nn.CrossEntropyLoss(weight=weight, ignore_index=ignore_index)
+        self.aux_ratio = aux_ratio
+    
+    
+    def compute_loss(self, pred, gt, is_aux=False):
+        if gt.dim() == 4:
+            gt = torch.squeeze(gt, 1)
+        gt = gt.long()
         
-        # for dset in tasks:
-        #     task_loss = sparsity_weight[dset] * F.cross_entropy(gate_logits[dset], gt)
-        #     loss += task_loss
+        if is_aux:
+            return self.loss_fn(pred, gt) * self.aux_ratio
+        else:
+            return self.loss_fn(pred, gt)
+            
         
-    return loss
-
-
-
-def gate_similarity_loss(gate_logits, shift_func='exp'):
-    similarity_loss = 0.
-    for logits in gate_logits.values():
-        similarity_loss +=torch.exp(F.cosine_similarity(logits[:, 0], logits[:, 1], dim=0))
-    
-    return similarity_loss
-        
-        
-def feature_cosine_similarity(feat, policy_feat):
-    feat = F.avg_pool2d(feat, feat.shape[2:]).view(feat.shape[0], -1)
-    policy_feat = F.avg_pool2d(policy_feat, policy_feat.shape[2:]).view(policy_feat.shape[0], -1)
-    
-    return F.cosine_similarity(feat, policy_feat, dim=1)
-    # print(feat)
-    # print(policy_feat)
-    
-    # print(feat.size(), policy_feat.size())
-    # print(F.cosine_similarity(feat, policy_feat, dim=0))
-    # print(F.cosine_similarity(feat, policy_feat, dim=1))
-    # exit()
-    # for f, p_f in zip(feat, policy_feat):
-    #     print(f.size(), p_f.size())
-    #     print(F.cosine_similarity(f, p_f, dim=0))
-    #     print(F.cosine_similarity(f, p_f, dim=-1))
-    #     print()
-        
-    # exit()
-    
-    
-    # return sum(F.cosine_similarity(f, p_f, dim=0) for f, p_f in zip(feat, policy_feat))
-
-    
+def get_loss_fn(dataset, task, **task_args):
+    if task == "sseg":
+        return SemSegLoss(dataset, **task_args)
+    elif task == "depth":
+        return DepthLoss(dataset, **task_args)
+    elif task == "sn":
+        return NormalLoss(dataset, **task_args)
+    elif task == "keypoint":
+        return KeypointLoss(dataset, **task_args)
+    elif task == "edge":
+        return EdgeLoss(dataset, **task_args)
+    else:
+        raise ValueError("not supported loss type")
